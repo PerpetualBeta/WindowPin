@@ -1,6 +1,7 @@
 import AppKit
 import ApplicationServices
 import SwiftUI
+import ServiceManagement
 
 // MARK: - Global CGEvent tap callback (must be a C-compatible function)
 
@@ -15,7 +16,6 @@ private func hotkeyTapCallback(
     event: CGEvent,
     refcon: UnsafeMutableRawPointer?
 ) -> Unmanaged<CGEvent>? {
-    // Re-enable tap if it was disabled by the system
     if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
         if let tap = _eventTap {
             CGEvent.tapEnable(tap: tap, enable: true)
@@ -36,7 +36,7 @@ private func hotkeyTapCallback(
             DispatchQueue.main.async {
                 _hotkeyAction?()
             }
-            return nil // consume the event
+            return nil
         }
     }
 
@@ -49,18 +49,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private var statusItem: NSStatusItem!
     private let tracker = PinnedWindowTracker()
-    private var aboutPopover: NSPopover?
-    private var aboutMonitor: Any?
+    let updateChecker = JorvikUpdateChecker(repoName: "WindowPin")
 
-    /// Cached last-known frontmost foreign window (before our menu steals focus).
     private var lastForeignWindow: ForeignWindow?
     private var focusObserver: NSObjectProtocol?
 
-    /// Current shortcut configuration
-    private var shortcutKeyCode: UInt16 = 35
-    private var shortcutModifiers: NSEvent.ModifierFlags = [.command, .control]
+    var shortcutKeyCode: UInt16 = 35
+    var shortcutModifiers: NSEvent.ModifierFlags = [.command, .control]
 
-    /// Retry timer for CGEvent tap (waits for Accessibility permission)
+    /// Expose the CGEvent tap for JorvikShortcutRecorder to temporarily disable during recording
+    var currentEventTap: CFMachPort? { _eventTap }
+
     private var permissionTimer: Timer?
 
     // MARK: - Lifecycle
@@ -68,28 +67,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
 
-        // Request Accessibility permission (prompts user if not yet granted)
         let options = [kAXTrustedCheckOptionPrompt.takeRetainedValue(): true] as CFDictionary
         let trusted = AXIsProcessTrustedWithOptions(options)
         wplog("Accessibility trusted: \(trusted)")
 
-        // Load saved shortcut
         loadShortcut()
 
-        // Status item
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         updateIcon()
+        JorvikMenuBarPill.apply(to: statusItem.button!)
+        updateChecker.checkOnSchedule()
 
         let menu = NSMenu()
         menu.delegate = self
         statusItem.menu = menu
 
-        // Track changes to update icon
         tracker.onChange = { [weak self] in
             self?.updateIcon()
         }
 
-        // Track frontmost app changes so we always know the last foreign window
         focusObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification,
             object: nil,
@@ -107,8 +103,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
 
-        // Register global hotkey via CGEvent tap
         registerHotkey()
+
+        DistributedNotificationCenter.default.addObserver(
+            self,
+            selector: #selector(appearanceChanged),
+            name: NSNotification.Name("AppleInterfaceThemeChangedNotification"),
+            object: nil
+        )
 
         wplog("Launched successfully")
     }
@@ -120,6 +122,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         if let obs = focusObserver { NSWorkspace.shared.notificationCenter.removeObserver(obs) }
         tracker.unpinAll()
+    }
+
+    @objc private func appearanceChanged() {
+        if let button = statusItem.button {
+            JorvikMenuBarPill.refresh(on: button)
+        }
     }
 
     // MARK: - Icon
@@ -145,7 +153,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(aboutItem)
         menu.addItem(NSMenuItem.separator())
 
-        // When menu opens, WindowPin is frontmost — use cached last foreign window
+        // Pin/Unpin action
         let targetWindow = WindowDetector.getFrontmostForeignWindow() ?? lastForeignWindow
 
         if let fw = targetWindow {
@@ -187,27 +195,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         menu.addItem(NSMenuItem.separator())
 
-        let shortcutDisplay = shortcutDisplayString()
-        let changeItem = NSMenuItem(title: "Change Shortcut (\(shortcutDisplay))…", action: #selector(changeShortcut), keyEquivalent: "")
-        menu.addItem(changeItem)
-
-        // Capture rate submenu
-        let rateItem = NSMenuItem(title: "Capture Rate", action: nil, keyEquivalent: "")
-        let rateMenu = NSMenu()
-        let currentRate = WindowOverlay.captureRate
-        for rate: Double in [0.5, 1, 2, 5, 10, 15, 30] {
-            let label = rate < 1 ? String(format: "%.1f fps", rate) : "\(Int(rate)) fps"
-            let item = NSMenuItem(title: label, action: #selector(setCaptureRate(_:)), keyEquivalent: "")
-            item.representedObject = rate
-            item.state = abs(currentRate - rate) < 0.01 ? .on : .off
-            rateMenu.addItem(item)
-        }
-        rateItem.submenu = rateMenu
-        menu.addItem(rateItem)
-
-        let allSpacesItem = NSMenuItem(title: "Pin to All Spaces", action: #selector(toggleAllSpaces), keyEquivalent: "")
-        allSpacesItem.state = WindowOverlay.pinToAllSpaces ? .on : .off
-        menu.addItem(allSpacesItem)
+        let settingsItem = NSMenuItem(title: "Settings\u{2026}", action: #selector(openSettings), keyEquivalent: ",")
+        settingsItem.target = self
+        menu.addItem(settingsItem)
 
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Quit WindowPin", action: #selector(quit), keyEquivalent: "q"))
@@ -229,23 +219,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         tracker.unpinAll()
     }
 
-    @objc private func setCaptureRate(_ sender: NSMenuItem) {
-        guard let rate = sender.representedObject as? Double else { return }
-        UserDefaults.standard.set(rate, forKey: "captureRate")
-        tracker.updateCaptureRate()
-        wplog("setCaptureRate: \(rate) fps")
-    }
-
-    @objc private func toggleAllSpaces() {
-        let newValue = !WindowOverlay.pinToAllSpaces
-        UserDefaults.standard.set(newValue, forKey: "pinToAllSpaces")
-        tracker.updateAllSpaces()
-        wplog("toggleAllSpaces: \(newValue)")
-    }
-
     @objc private func quit() {
         tracker.unpinAll()
         NSApp.terminate(nil)
+    }
+
+    // MARK: - About & Settings
+
+    @objc private func openAbout() {
+        JorvikAboutView.showWindow(
+            appName: "WindowPin",
+            repoName: "WindowPin",
+            productPage: "utilities/windowpin"
+        )
+    }
+
+    @objc private func openSettings() {
+        let trackerRef = tracker
+        let delegate = self
+        JorvikSettingsView.showWindow(
+            appName: "WindowPin",
+            updateChecker: updateChecker
+        ) {
+            WindowPinSettingsContent(tracker: trackerRef, delegate: delegate)
+        }
     }
 
     // MARK: - Global hotkey (CGEvent tap)
@@ -258,7 +255,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         _shortcutCGModifiers = nsToCGModifiers(shortcutModifiers)
 
         if !tryCreateEventTap() {
-            // Permission not yet granted — poll until it is
             wplog("registerHotkey: waiting for Accessibility permission…")
             permissionTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] timer in
                 if AXIsProcessTrusted() {
@@ -273,7 +269,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func tryCreateEventTap() -> Bool {
-        // Don't create a second tap
         if _eventTap != nil { return true }
 
         let mask: CGEventMask = (1 << CGEventType.keyDown.rawValue)
@@ -321,69 +316,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    func saveShortcutAndUpdateTap() {
+        saveShortcut()
+    }
+
     private func saveShortcut() {
         UserDefaults.standard.set(Int(shortcutKeyCode), forKey: "shortcutKeyCode")
         UserDefaults.standard.set(Int(shortcutModifiers.rawValue), forKey: "shortcutModifiers")
-
-        // Update the CGEvent tap globals
         _shortcutKeyCode = Int64(shortcutKeyCode)
         _shortcutCGModifiers = nsToCGModifiers(shortcutModifiers)
     }
 
-    @objc private func changeShortcut() {
-        let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 320, height: 80),
-            styleMask: [.titled, .closable],
-            backing: .buffered,
-            defer: false
-        )
-        panel.title = "Record Shortcut"
-        panel.isFloatingPanel = true
-        panel.level = .floating
-        panel.center()
+    // Shortcut recording is handled by JorvikShortcutRecorder in JorvikKit
 
-        let label = NSTextField(labelWithString: "Press your desired key combination…")
-        label.alignment = .center
-        label.frame = NSRect(x: 20, y: 30, width: 280, height: 30)
-
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 80))
-        container.addSubview(label)
-        panel.contentView = container
-
-        // Use a local event monitor to capture the next key press
-        var monitor: Any?
-        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard let self = self else { return event }
-            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-
-            // Require at least one modifier key
-            guard flags.contains(.command) || flags.contains(.control) || flags.contains(.option) else {
-                return event
-            }
-
-            // Escape cancels
-            if event.keyCode == 53 {
-                if let m = monitor { NSEvent.removeMonitor(m) }
-                panel.close()
-                return nil
-            }
-
-            self.shortcutKeyCode = event.keyCode
-            self.shortcutModifiers = flags.intersection([.command, .control, .option, .shift])
-            self.saveShortcut()
-
-            wplog("changeShortcut: new shortcut keyCode=\(event.keyCode) mods=\(flags.rawValue) display=\(self.shortcutDisplayString())")
-
-            if let m = monitor { NSEvent.removeMonitor(m) }
-            panel.close()
-            return nil
-        }
-
-        panel.makeKeyAndOrderFront(nil)
-        NSApp.activate()
-    }
-
-    private func shortcutDisplayString() -> String {
+    func shortcutDisplayString() -> String {
         var parts: [String] = []
         if shortcutModifiers.contains(.control) { parts.append("⌃") }
         if shortcutModifiers.contains(.option) { parts.append("⌥") }
@@ -418,30 +364,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if ns.contains(.option) { cg.insert(.maskAlternate) }
         if ns.contains(.shift) { cg.insert(.maskShift) }
         return cg
-    }
-
-    // MARK: - About
-
-    @objc private func openAbout() {
-        guard let button = statusItem.button else { return }
-        let p = NSPopover()
-        p.behavior = .applicationDefined
-        p.animates = true
-        let hc = NSHostingController(rootView: AboutView(appName: "WindowPin", onDismiss: { [weak self] in self?.closeAbout() }))
-        hc.view.wantsLayer = true
-        hc.view.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
-        p.contentViewController = hc
-        p.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-        aboutPopover = p
-        aboutMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
-            self?.closeAbout()
-        }
-    }
-
-    private func closeAbout() {
-        aboutPopover?.performClose(nil)
-        aboutPopover = nil
-        if let m = aboutMonitor { NSEvent.removeMonitor(m); aboutMonitor = nil }
     }
 
     // MARK: - Helpers

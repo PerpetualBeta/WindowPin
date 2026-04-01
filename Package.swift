@@ -12,6 +12,7 @@ let package = Package(
                 .unsafeFlags(["-framework", "AppKit"]),
                 .unsafeFlags(["-framework", "ApplicationServices"]),
                 .unsafeFlags(["-framework", "ScreenCaptureKit"]),
+                .unsafeFlags(["-framework", "ServiceManagement"]),
             ]
         )
     ]

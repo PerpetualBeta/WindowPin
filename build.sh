@@ -29,7 +29,7 @@ cat > "$CONTENTS/Info.plist" << 'PLIST'
     <key>CFBundleExecutable</key>
     <string>WindowPin</string>
     <key>CFBundleIdentifier</key>
-    <string>com.jorvik.WindowPin</string>
+    <string>cc.jorviksoftware.WindowPin</string>
     <key>CFBundleName</key>
     <string>WindowPin</string>
     <key>CFBundleDisplayName</key>
@@ -54,6 +54,9 @@ PLIST
 
 echo "==> Code signing..."
 xattr -cr "$APP_BUNDLE"
-codesign --force --sign A74F91AE01AD39816B37E04FA1C764CA5F284577 "$APP_BUNDLE"
+codesign --force --sign "Developer ID Application: Jonthan Hollin (EG86BCGUE7)" \
+    --options runtime \
+    --timestamp \
+    "$APP_BUNDLE"
 
 echo "==> Done: $APP_BUNDLE"
