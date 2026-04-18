@@ -8,9 +8,15 @@ A macOS utility that lets you pin any window as a floating, always-on-top overla
 
 ## Installation
 
-1. Double-click `WindowPin.app` to launch it (or build from source — see below)
-2. A pin icon appears in your menu bar
-3. Grant the permissions when prompted (see [Permissions](#permissions) below)
+Two formats on every release — both signed and notarised, pick whichever suits:
+
+- **[Installer (`.pkg`)](https://github.com/PerpetualBeta/WindowPin/releases/latest/download/WindowPin.pkg)** — recommended for first-time installs. Double-click to run; macOS Installer places the app in `/Applications` without quarantine or App Translocation.
+- **[Download (`.zip`)](https://github.com/PerpetualBeta/WindowPin/releases/latest)** — unzip and drag `WindowPin.app` to your Applications folder.
+
+After installation:
+
+1. Launch WindowPin — a pin icon appears in your menu bar
+2. Grant the permissions when prompted (see [Permissions](#permissions) below)
 
 ## How It Works
 
