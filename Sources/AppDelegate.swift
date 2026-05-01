@@ -72,6 +72,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         wplog("Accessibility trusted: \(trusted)")
 
         loadShortcut()
+        republishHotkey()
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         updateIcon()
@@ -325,6 +326,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         UserDefaults.standard.set(Int(shortcutModifiers.rawValue), forKey: "shortcutModifiers")
         _shortcutKeyCode = Int64(shortcutKeyCode)
         _shortcutCGModifiers = nsToCGModifiers(shortcutModifiers)
+        republishHotkey()
+    }
+
+    /// Push current binding to the JorvikKit registry so ShortcutHUD can list it.
+    private func republishHotkey() {
+        JorvikHotkeyRegistry.publish([
+            JorvikHotkey(actionTitle: "Toggle Pin",
+                         keyCode: shortcutKeyCode,
+                         modifiers: shortcutModifiers,
+                         activeContext: .anywhere),
+        ])
     }
 
     // Shortcut recording is handled by JorvikShortcutRecorder in JorvikKit
