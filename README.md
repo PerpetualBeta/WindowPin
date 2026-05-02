@@ -97,6 +97,10 @@ When enabled, pinned overlays appear on every Mission Control space. When disabl
 
 Click **Change Shortcut** in the menu, then press your desired key combination. The shortcut must include at least one modifier key (⌘, ⌃, ⌥, or ⇧).
 
+### Menu Bar Icon
+
+- **Menu bar icon pill** — optional grey background for stronger contrast on busy or wallpaper-tinted menu bars (off by default)
+
 All settings are saved automatically and persist across restarts.
 
 ## Permissions
