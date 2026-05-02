@@ -82,6 +82,6 @@ struct WindowPinSettingsContent: View {
             }
         }
 
-        MenuBarPillSettings()
+        MenuBarPillSettings { delegate.updateIcon() }
     }
 }

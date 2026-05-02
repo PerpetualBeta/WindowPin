@@ -74,9 +74,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         loadShortcut()
         republishHotkey()
 
+        migrateLegacyPillColorKey()
+
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         updateIcon()
-        JorvikMenuBarPill.apply(to: statusItem.button!)
         updateChecker.checkOnSchedule()
 
         let menu = NSMenu()
@@ -106,14 +107,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         registerHotkey()
 
-        DistributedNotificationCenter.default.addObserver(
-            self,
-            selector: #selector(appearanceChanged),
-            name: NSNotification.Name("AppleInterfaceThemeChangedNotification"),
-            object: nil
-        )
-
         wplog("Launched successfully")
+    }
+
+    // One-shot removal of the user-chosen pill colour key from the old design.
+    // The new pill uses fixed grey/light colours; the key is dead weight.
+    private func migrateLegacyPillColorKey() {
+        let migrated = "didMigratePillColorV2"
+        if UserDefaults.standard.bool(forKey: migrated) { return }
+        UserDefaults.standard.removeObject(forKey: "menuBarPillColor")
+        UserDefaults.standard.set(true, forKey: migrated)
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -125,23 +128,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         tracker.unpinAll()
     }
 
-    @objc private func appearanceChanged() {
-        if let button = statusItem.button {
-            JorvikMenuBarPill.refresh(on: button)
-        }
-    }
-
     // MARK: - Icon
 
-    private func updateIcon() {
+    func updateIcon() {
         let hasPinned = !tracker.pinnedWindows.isEmpty
         let symbolName = hasPinned ? "pin.fill" : "pin"
-        if let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "WindowPin") {
-            image.isTemplate = true
-            statusItem.button?.image = image
-        } else {
-            statusItem.button?.title = hasPinned ? "📌" : "📍"
-        }
+        statusItem.button?.image = JorvikMenuBarPill.icon(
+            symbolName: symbolName,
+            accessibilityDescription: "WindowPin"
+        )
     }
 
     // MARK: - Dynamic menu (NSMenuDelegate)
