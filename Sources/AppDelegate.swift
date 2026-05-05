@@ -2,6 +2,7 @@ import AppKit
 import ApplicationServices
 import SwiftUI
 import ServiceManagement
+import Sparkle
 
 // MARK: - Global CGEvent tap callback (must be a C-compatible function)
 
@@ -51,6 +52,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let tracker = PinnedWindowTracker()
     let updateChecker = JorvikUpdateChecker(repoName: "WindowPin")
 
+    // Sparkle handles the actual update checking and installation. The
+    // legacy JorvikUpdateChecker is kept for the Settings UI continuity but
+    // its scheduled check is suppressed below.
+    let userDriverDelegate = WindowPinUserDriverDelegate()
+    lazy var sparkleUpdater = SPUStandardUpdaterController(
+        startingUpdater: true,
+        updaterDelegate: nil,
+        userDriverDelegate: userDriverDelegate
+    )
+
     private var lastForeignWindow: ForeignWindow?
     private var focusObserver: NSObjectProtocol?
 
@@ -78,7 +89,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         updateIcon()
-        updateChecker.checkOnSchedule()
+        _ = sparkleUpdater  // touch lazy to start the updater
+        // updateChecker.checkOnSchedule()  // disabled; Sparkle handles it now
 
         let menu = NSMenu()
         menu.delegate = self
@@ -195,6 +207,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         settingsItem.target = self
         menu.addItem(settingsItem)
 
+        let updatesItem = NSMenuItem(title: "Check for Updates\u{2026}", action: #selector(checkForUpdates(_:)), keyEquivalent: "")
+        updatesItem.target = self
+        menu.addItem(updatesItem)
+
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Quit WindowPin", action: #selector(quit), keyEquivalent: "q"))
     }
@@ -221,6 +237,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     // MARK: - About & Settings
+
+    @objc func checkForUpdates(_ sender: Any?) {
+        sparkleUpdater.checkForUpdates(sender)
+    }
 
     @objc private func openAbout() {
         JorvikAboutView.showWindow(
@@ -377,5 +397,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func truncate(_ s: String, max: Int) -> String {
         s.count > max ? String(s.prefix(max)) + "…" : s
+    }
+}
+
+// MARK: - Sparkle User Driver Delegate
+
+/// Brings WindowPin to the front before Sparkle shows any modal dialog.
+/// Without this, Sparkle's NSAlert appears but stays behind whatever app
+/// is currently key, because LSUIElement apps don't auto-activate when
+/// they present windows.
+final class WindowPinUserDriverDelegate: NSObject, SPUStandardUserDriverDelegate {
+    func standardUserDriverWillShowModalAlert() {
+        NSApp.activate(ignoringOtherApps: true)
     }
 }

@@ -74,6 +74,7 @@ Click the icon to access:
 - **Change Shortcut** — set a custom keyboard shortcut
 - **Capture Rate** — adjust how often the overlay refreshes
 - **Pin to All Spaces** — make overlays visible across all Mission Control spaces
+- **Check for Updates…** — manual Sparkle update check
 - **Quit**
 
 ## Settings
@@ -102,6 +103,10 @@ Click **Change Shortcut** in the menu, then press your desired key combination. 
 - **Menu bar icon pill** — optional grey background for stronger contrast on busy or wallpaper-tinted menu bars (off by default)
 
 All settings are saved automatically and persist across restarts.
+
+### Updates
+
+Updates are handled by [Sparkle](https://sparkle-project.org). WindowPin checks for new versions automatically once a day in the background; use **Check for Updates…** in the menu for an on-demand check.
 
 ## Permissions
 
