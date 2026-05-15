@@ -50,11 +50,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private var statusItem: NSStatusItem!
     private let tracker = PinnedWindowTracker()
-    let updateChecker = JorvikUpdateChecker(repoName: "WindowPin")
 
-    // Sparkle handles the actual update checking and installation. The
-    // legacy JorvikUpdateChecker is kept for the Settings UI continuity but
-    // its scheduled check is suppressed below.
     let userDriverDelegate = WindowPinUserDriverDelegate()
     lazy var sparkleUpdater = SPUStandardUpdaterController(
         startingUpdater: true,
@@ -90,7 +86,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         updateIcon()
         _ = sparkleUpdater  // touch lazy to start the updater
-        // updateChecker.checkOnSchedule()  // disabled; Sparkle handles it now
 
         let menu = NSMenu()
         menu.delegate = self
@@ -254,10 +249,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func openSettings() {
         let trackerRef = tracker
         let delegate = self
-        JorvikSettingsView.showWindow(
-            appName: "WindowPin",
-            updateChecker: updateChecker
-        ) {
+        JorvikSettingsView.showWindow(appName: "WindowPin") {
             WindowPinSettingsContent(tracker: trackerRef, delegate: delegate)
         }
     }
