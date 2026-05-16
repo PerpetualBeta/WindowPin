@@ -281,9 +281,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if _eventTap != nil { return true }
 
         let mask: CGEventMask = (1 << CGEventType.keyDown.rawValue)
+        // Tap location & position chosen to play nicely with keystroke
+        // rewriters like HyperKey and Karabiner-Elements that synthesise
+        // "Hyper" (shift+ctrl+opt+cmd) from a single physical key. At
+        // .cgSessionEventTap with .headInsertEventTap we'd see the raw
+        // event (e.g. Caps Lock + key) before the rewriter transforms
+        // it, never matching the user's Hyper-bound shortcut.
+        // .cgAnnotatedSessionEventTap is the latest tap layer — after
+        // HID-level and session-level rewriters — and .tailAppendEventTap
+        // runs us last in our level's chain. Real-modifier bindings
+        // (cmd+opt+arrows etc.) keep working because they don't need a
+        // rewriter; only Hyper-derived shortcuts ever depended on the
+        // rewriter running first.
         guard let tap = CGEvent.tapCreate(
-            tap: .cgSessionEventTap,
-            place: .headInsertEventTap,
+            tap: .cgAnnotatedSessionEventTap,
+            place: .tailAppendEventTap,
             options: .defaultTap,
             eventsOfInterest: mask,
             callback: hotkeyTapCallback,
