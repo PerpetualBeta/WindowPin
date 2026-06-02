@@ -114,6 +114,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         registerHotkey()
 
+        // Redraw the status icon when the display configuration changes — the
+        // menu bar's effective thickness can shrink (e.g. moving from a notched
+        // display to an external one) and leave the pre-rendered pill cropped.
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.updateIcon()
+        }
+
         wplog("Launched successfully")
     }
 
