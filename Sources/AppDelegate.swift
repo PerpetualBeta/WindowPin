@@ -48,7 +48,7 @@ private func hotkeyTapCallback(
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
-    private var statusItem: NSStatusItem!
+    private var statusItem: NSStatusItem?
     private let tracker = PinnedWindowTracker()
 
     let userDriverDelegate = WindowPinUserDriverDelegate()
@@ -83,13 +83,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         migrateLegacyPillColorKey()
 
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        updateIcon()
+        createStatusItem()
         _ = sparkleUpdater  // touch lazy to start the updater
 
-        let menu = NSMenu()
-        menu.delegate = self
-        statusItem.menu = menu
+        NotificationCenter.default.addObserver(
+            forName: JorvikStatusItemVisibility.didChangeNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.applyStatusItemVisibility()
+        }
 
         tracker.onChange = { [weak self] in
             self?.updateIcon()
@@ -145,12 +147,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         tracker.unpinAll()
     }
 
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        JorvikStatusItemVisibility.handleReopen()
+        return true
+    }
+
+    // MARK: - Status item
+
+    func createStatusItem() {
+        guard JorvikStatusItemVisibility.isVisible else { return }
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        updateIcon()
+
+        let menu = NSMenu()
+        menu.delegate = self
+        statusItem?.menu = menu
+    }
+
+    func applyStatusItemVisibility() {
+        if JorvikStatusItemVisibility.isVisible {
+            if statusItem == nil { createStatusItem() }
+        } else if let item = statusItem {
+            NSStatusBar.system.removeStatusItem(item)
+            statusItem = nil
+        }
+    }
+
     // MARK: - Icon
 
     func updateIcon() {
         let hasPinned = !tracker.pinnedWindows.isEmpty
         let symbolName = hasPinned ? "pin.fill" : "pin"
-        statusItem.button?.image = JorvikMenuBarPill.icon(
+        statusItem?.button?.image = JorvikMenuBarPill.icon(
             symbolName: symbolName,
             accessibilityDescription: "WindowPin"
         )
