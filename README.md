@@ -100,7 +100,10 @@ Click **Change Shortcut** in the menu, then press your desired key combination. 
 
 ### Menu Bar Icon
 
+- **Show icon in menu bar** — hide the menu-bar status icon while WindowPin keeps running; it remains reachable via its keyboard shortcut (Control+Command+P). The choice persists across launches, including login auto-start. *Shown only on macOS 14–15 — on macOS 26 (Tahoe) and later, use System Settings → Menu Bar, which provides this natively.*
 - **Menu bar icon pill** — optional grey background for stronger contrast on busy or wallpaper-tinted menu bars (off by default)
+
+If you've hidden the status icon and want it back, simply re-open WindowPin from your Applications folder — it reappears immediately.
 
 All settings are saved automatically and persist across restarts.
 
