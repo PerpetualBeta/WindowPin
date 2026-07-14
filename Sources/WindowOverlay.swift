@@ -32,6 +32,11 @@ class WindowOverlay: NSPanel {
     private var displayedFrame: CVPixelBuffer?
     private var frameSyncTimer: Timer?
     private var lastStreamSize: CGSize = .zero
+    /// Points→pixels scale of the capture, taken from the content filter.
+    private var streamPixelScale: CGFloat = 2
+    private var didLogFirstFrame = false
+    /// Total frames delivered by the stream (diagnostics).
+    private(set) var framesReceived = 0
 
     /// Whether the overlay is currently in "pinned visible" mode.
     private(set) var isPinVisible = false
@@ -217,7 +222,7 @@ class WindowOverlay: NSPanel {
         Task {
             do {
                 let filter = SCContentFilter(desktopIndependentWindow: scWindow)
-                let config = self.makeStreamConfig()
+                let config = self.makeStreamConfig(pixelScale: CGFloat(filter.pointPixelScale))
                 let image = try await SCScreenshotManager.captureImage(
                     contentFilter: filter, configuration: config
                 )
@@ -255,9 +260,14 @@ class WindowOverlay: NSPanel {
             return
         }
 
-        let config = makeStreamConfig()
-        lastStreamSize = frame.size
         let filter = SCContentFilter(desktopIndependentWindow: scWindow)
+        // Capture at the window's true native scale: 1:1 pixels need no
+        // resampling at composite time, which is what keeps text sharp.
+        let filterScale = CGFloat(filter.pointPixelScale)
+        streamPixelScale = filterScale >= 1 ? filterScale : displayScale
+        let config = makeStreamConfig(pixelScale: streamPixelScale)
+        lastStreamSize = frame.size
+        didLogFirstFrame = false
         let newStream = SCStream(filter: filter, configuration: config, delegate: self)
         do {
             try newStream.addStreamOutput(self, type: .screen, sampleHandlerQueue: sampleQueue)
@@ -286,10 +296,10 @@ class WindowOverlay: NSPanel {
         }
     }
 
-    /// Apply the current capture-rate setting to a running stream.
+    /// Apply the current capture-rate setting / frame size to a running stream.
     func applyCaptureRate() {
         guard let stream = stream else { return }
-        stream.updateConfiguration(makeStreamConfig()) { error in
+        stream.updateConfiguration(makeStreamConfig(pixelScale: streamPixelScale)) { error in
             if let error = error {
                 wplog("overlay: updateConfiguration (rate) error: \(error)")
             }
@@ -302,11 +312,24 @@ class WindowOverlay: NSPanel {
             : [.fullScreenAuxiliary]
     }
 
-    private func makeStreamConfig() -> SCStreamConfiguration {
+    /// Backing scale of the screen the overlay (or its target frame) is on.
+    private var displayScale: CGFloat {
+        if let screen = screen { return screen.backingScaleFactor }
+        let f = frame
+        if let match = NSScreen.screens.first(where: { $0.frame.intersects(f) }) {
+            return match.backingScaleFactor
+        }
+        return NSScreen.main?.backingScaleFactor ?? 2
+    }
+
+    private func makeStreamConfig(pixelScale: CGFloat) -> SCStreamConfiguration {
         let config = SCStreamConfiguration()
-        let scale = screen?.backingScaleFactor ?? 2
-        config.width = max(Int(frame.width * scale), 1)
-        config.height = max(Int(frame.height * scale), 1)
+        // Size the output to the window's native pixels and pin the resolution
+        // to .best — .automatic can deliver nominal (1x) frames that end up
+        // stretched over a Retina layer, which reads as a slightly blurred pin.
+        config.width = max(Int(frame.width * pixelScale), 1)
+        config.height = max(Int(frame.height * pixelScale), 1)
+        config.captureResolution = .best
         config.scalesToFit = true
         config.showsCursor = false
         config.pixelFormat = kCVPixelFormatType_32BGRA
@@ -388,6 +411,11 @@ extension WindowOverlay: SCStreamOutput, SCStreamDelegate {
         let surfaceRef = surface.takeUnretainedValue()
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
+            self.framesReceived += 1
+            if !self.didLogFirstFrame {
+                self.didLogFirstFrame = true
+                wplog("overlay: first frame \(CVPixelBufferGetWidth(pixelBuffer))x\(CVPixelBufferGetHeight(pixelBuffer))px for \(Int(self.frame.width))x\(Int(self.frame.height))pt @\(self.streamPixelScale)x wid=\(self.targetWindowID)")
+            }
             self.displayedFrame = pixelBuffer
             self.contentLayer.contents = surfaceRef
         }

@@ -15,11 +15,34 @@ enum EventForwarder {
 
         switch event.type {
         case .scrollWheel:
-            postScroll(event, at: targetPoint, pid: overlay.targetPID)
+            postScroll(event, at: targetPoint, windowID: overlay.targetWindowID, pid: overlay.targetPID)
         default:
-            postMouse(event, at: targetPoint, pid: overlay.targetPID)
+            postMouse(event, at: targetPoint, windowID: overlay.targetWindowID, pid: overlay.targetPID)
         }
     }
+
+    /// Posting to a pid alone is not enough: AppKit in the receiving process
+    /// must bind the event to one of its windows, and the window actually under
+    /// the pointer is the overlay — a different process's window. Background
+    /// apps drop unbound mouse/scroll events (they have no key window to fall
+    /// back on). Stamping the target window into the event record — including
+    /// the private fields 51 (target window number) and 58 (routing flag) —
+    /// makes delivery work regardless of the target app's activation state.
+    private static func addressToWindow(_ cg: CGEvent, windowID: CGWindowID, pid: pid_t) {
+        cg.setIntegerValueField(.eventTargetUnixProcessID, value: Int64(pid))
+        cg.setIntegerValueField(.mouseEventWindowUnderMousePointer, value: Int64(windowID))
+        cg.setIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent, value: Int64(windowID))
+        if let windowField = CGEventField(rawValue: 51) {
+            cg.setIntegerValueField(windowField, value: Int64(windowID))
+        }
+        if let routeField = CGEventField(rawValue: 58) {
+            cg.setIntegerValueField(routeField, value: 1)
+        }
+    }
+
+    /// Shared session-state source so synthesized events carry normal
+    /// modifier/button state bookkeeping.
+    private static let eventSource = CGEventSource(stateID: .combinedSessionState)
 
     // MARK: - Coordinate mapping
 
@@ -55,18 +78,20 @@ enum EventForwarder {
 
     // MARK: - Mouse events
 
-    private static func postMouse(_ event: NSEvent, at point: CGPoint, pid: pid_t) {
+    private static func postMouse(_ event: NSEvent, at point: CGPoint, windowID: CGWindowID, pid: pid_t) {
         guard let (cgType, button) = mouseType(for: event),
               let cg = CGEvent(
-                  mouseEventSource: nil, mouseType: cgType,
+                  mouseEventSource: eventSource, mouseType: cgType,
                   mouseCursorPosition: point, mouseButton: button
               ) else { return }
 
         cg.flags = cgFlags(event.modifierFlags)
         cg.setIntegerValueField(.mouseEventClickState, value: Int64(max(event.clickCount, 1)))
+        cg.setDoubleValueField(.mouseEventPressure, value: Double(event.pressure))
         if cgType == .otherMouseDown || cgType == .otherMouseUp || cgType == .otherMouseDragged {
             cg.setIntegerValueField(.mouseEventButtonNumber, value: Int64(event.buttonNumber))
         }
+        addressToWindow(cg, windowID: windowID, pid: pid)
         cg.postToPid(pid)
     }
 
@@ -87,13 +112,13 @@ enum EventForwarder {
 
     // MARK: - Scroll events
 
-    private static func postScroll(_ event: NSEvent, at point: CGPoint, pid: pid_t) {
+    private static func postScroll(_ event: NSEvent, at point: CGPoint, windowID: CGWindowID, pid: pid_t) {
         let dy = event.scrollingDeltaY
         let dx = event.scrollingDeltaX
         // Trackpads/Magic Mouse report precise pixel deltas; wheel mice report lines.
         let units: CGScrollEventUnit = event.hasPreciseScrollingDeltas ? .pixel : .line
         guard let cg = CGEvent(
-            scrollWheelEvent2Source: nil, units: units, wheelCount: 2,
+            scrollWheelEvent2Source: eventSource, units: units, wheelCount: 2,
             wheel1: scrollSteps(dy), wheel2: scrollSteps(dx), wheel3: 0
         ) else { return }
 
@@ -104,6 +129,7 @@ enum EventForwarder {
         }
         cg.flags = cgFlags(event.modifierFlags)
         cg.location = point
+        addressToWindow(cg, windowID: windowID, pid: pid)
         cg.postToPid(pid)
     }
 
