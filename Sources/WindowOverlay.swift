@@ -1,28 +1,47 @@
 import AppKit
+import CoreMedia
 import ScreenCaptureKit
 
-/// A floating panel that captures and displays a foreign window's content.
-/// Acts as a live "picture-in-picture" view that stays on top of all windows.
+/// A floating panel that mirrors a foreign window's content via a live
+/// ScreenCaptureKit stream. Acts as a live "picture-in-picture" view that
+/// stays on top of all windows.
 ///
 /// Instead of hiding/showing (which causes flicker), the overlay stays on-screen
 /// at all times and toggles between z-levels:
 ///   - `.floating` when the user is in another app (overlay visible above everything)
 ///   - below normal when the user is using the real window (overlay hidden behind it)
+///
+/// The stream only runs while the overlay is front — frames arrive only when
+/// the window's content actually changes, and stopping the stream while the
+/// overlay is hidden keeps the system's "screen recording" indicator away.
+///
+/// While the overlay is front, clicks and scrolls on it are forwarded to the
+/// real window (see EventForwarder), so the pinned window can be scrolled and
+/// clicked without switching apps. ⌘-click switches to the real window.
 class WindowOverlay: NSPanel {
 
     let targetWindowID: CGWindowID
     let targetPID: pid_t
-    private var captureTimer: Timer?
-    private let imageView: NSImageView
+
+    private let contentLayer = CALayer()
     private var scWindow: SCWindow?
+    private var stream: SCStream?
+    private let sampleQueue = DispatchQueue(label: "cc.jorviksoftware.WindowPin.frames")
+    /// Retains the pixel buffer whose IOSurface the layer currently displays,
+    /// so ScreenCaptureKit can't recycle it out from under the layer.
+    private var displayedFrame: CVPixelBuffer?
+    private var frameSyncTimer: Timer?
+    private var lastStreamSize: CGSize = .zero
 
     /// Whether the overlay is currently in "pinned visible" mode.
     private(set) var isPinVisible = false
 
-    /// Capture rate in frames per second (configurable via UserDefaults "captureRate", default 1).
+    /// Maximum stream frame rate (configurable via UserDefaults "captureRate", default 30).
+    /// The stream only delivers frames when the window content changes, so a
+    /// high cap costs nothing for static content.
     static var captureRate: Double {
         let stored = UserDefaults.standard.double(forKey: "captureRate")
-        return stored > 0 ? stored : 1.0
+        return stored > 0 ? stored : 30.0
     }
 
     /// Whether pinned overlays appear on all Mission Control spaces.
@@ -30,10 +49,14 @@ class WindowOverlay: NSPanel {
         UserDefaults.standard.bool(forKey: "pinToAllSpaces")
     }
 
+    /// Whether clicks/scrolls on an overlay are forwarded to the real window.
+    static var forwardEvents: Bool {
+        UserDefaults.standard.object(forKey: "forwardEvents") as? Bool ?? true
+    }
+
     init(windowID: CGWindowID, pid: pid_t) {
         targetWindowID = windowID
         targetPID = pid
-        imageView = NSImageView()
 
         let frame = Self.getWindowFrame(windowID: windowID)
             ?? NSRect(x: 100, y: 100, width: 800, height: 600)
@@ -55,10 +78,14 @@ class WindowOverlay: NSPanel {
             ? [.canJoinAllSpaces, .fullScreenAuxiliary]
             : [.fullScreenAuxiliary]
 
-        imageView.imageScaling = .scaleAxesIndependently
-        imageView.frame = NSRect(origin: .zero, size: frame.size)
-        imageView.autoresizingMask = [.width, .height]
-        contentView = imageView
+        // Layer-hosting view: frames land straight on the layer as IOSurfaces,
+        // no NSImage conversion.
+        contentLayer.contentsGravity = .resize
+        let view = NSView(frame: NSRect(origin: .zero, size: frame.size))
+        view.layer = contentLayer
+        view.wantsLayer = true
+        view.autoresizingMask = [.width, .height]
+        contentView = view
 
         // Resolve the SCWindow asynchronously
         resolveSCWindow()
@@ -66,8 +93,8 @@ class WindowOverlay: NSPanel {
 
     // MARK: - ScreenCaptureKit window resolution
 
-    private func resolveSCWindow() {
-        Task {
+    private func resolveSCWindow(thenStartStream: Bool = false) {
+        Task { @MainActor in
             do {
                 let content = try await SCShareableContent.excludingDesktopWindows(
                     false, onScreenWindowsOnly: false
@@ -75,28 +102,64 @@ class WindowOverlay: NSPanel {
                 if let match = content.windows.first(where: { $0.windowID == targetWindowID }) {
                     self.scWindow = match
                     wplog("overlay: resolved SCWindow for wid=\(targetWindowID) title='\(match.title ?? "")'")
+                    if thenStartStream && self.isPinVisible {
+                        self.startStream()
+                    }
                 } else {
                     wplog("overlay: SCWindow NOT FOUND for wid=\(targetWindowID) (checked \(content.windows.count) windows)")
+                    scheduleResolveRetry(thenStartStream: thenStartStream)
                 }
             } catch {
                 wplog("overlay: SCShareableContent error: \(error)")
+                scheduleResolveRetry(thenStartStream: thenStartStream)
             }
         }
     }
 
-    // MARK: - Mouse handling
+    private func scheduleResolveRetry(thenStartStream: Bool) {
+        guard thenStartStream else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            guard let self = self, self.isPinVisible, self.stream == nil else { return }
+            self.resolveSCWindow(thenStartStream: true)
+        }
+    }
 
+    // MARK: - Event handling
+
+    override func sendEvent(_ event: NSEvent) {
+        guard isPinVisible, Self.forwardEvents else {
+            super.sendEvent(event)
+            return
+        }
+        switch event.type {
+        case .leftMouseDown where event.modifierFlags.contains(.command):
+            // Escape hatch: ⌘-click switches to the real window.
+            activateRealWindow()
+        case .leftMouseDown, .leftMouseUp, .leftMouseDragged,
+             .rightMouseDown, .rightMouseUp, .rightMouseDragged,
+             .otherMouseDown, .otherMouseUp, .otherMouseDragged,
+             .scrollWheel:
+            EventForwarder.forward(event, from: self)
+        default:
+            super.sendEvent(event)
+        }
+    }
+
+    /// Fallback when event forwarding is disabled: any click switches to the
+    /// real window (the pre-forwarding behaviour).
     override func mouseDown(with event: NSEvent) {
-        wplog("overlay: clicked wid=\(targetWindowID), activating actual window")
+        activateRealWindow()
+    }
 
-        // Drop overlay behind the real window, then raise the real window on top
+    private func activateRealWindow() {
+        wplog("overlay: switching to real window wid=\(targetWindowID)")
         sendBehind()
-        WindowLevelManager.raiseWindow(pid: self.targetPID, windowID: UInt32(self.targetWindowID))
+        WindowLevelManager.raiseWindow(pid: targetPID, windowID: UInt32(targetWindowID))
     }
 
     // MARK: - Z-level transitions (no hide/show, just level changes)
 
-    /// Make overlay visible above all windows. Captures a fresh frame first if possible.
+    /// Make overlay visible above all windows and start the live stream.
     func bringToFront() {
         guard !isPinVisible else {
             wplog("overlay: bringToFront skipped (already front) wid=\(targetWindowID)")
@@ -104,18 +167,20 @@ class WindowOverlay: NSPanel {
         }
         wplog("overlay: bringToFront wid=\(targetWindowID)")
         isPinVisible = true
-        updateFrameFromTarget()
+        syncFrameWithTarget()
 
         if !isVisible {
-            // First time — need to put on screen and start capturing
+            // First time — need to put on screen with content already in place
             doInitialShow()
             return
         }
 
-        // Already on screen but behind — just raise level
+        // Already on screen but behind — just raise level. The last streamed
+        // frame is still on the layer, so there's content until fresh frames land.
         level = .floating
         orderFront(nil)
-        startCapturing()
+        startStream()
+        startFrameSync()
     }
 
     /// Drop overlay behind all normal windows (invisible to user, but still on-screen).
@@ -123,7 +188,8 @@ class WindowOverlay: NSPanel {
         guard isPinVisible else { return }
         wplog("overlay: sendBehind wid=\(targetWindowID)")
         isPinVisible = false
-        stopCapturing()
+        stopStream()
+        stopFrameSync()
         level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.normalWindow)) - 1)
         orderBack(nil)
     }
@@ -132,7 +198,8 @@ class WindowOverlay: NSPanel {
     func hideOverlay() {
         wplog("overlay: hideOverlay wid=\(targetWindowID)")
         isPinVisible = false
-        stopCapturing()
+        stopStream()
+        stopFrameSync()
         orderOut(nil)
     }
 
@@ -140,32 +207,22 @@ class WindowOverlay: NSPanel {
 
     private func doInitialShow() {
         guard let scWindow = self.scWindow else {
-            // SCWindow not resolved yet — show immediately, capture will fill in
-            level = .floating
-            alphaValue = 0
-            orderFront(nil)
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.15
-                self.animator().alphaValue = 1
-            }
-            startCapturing()
+            // SCWindow not resolved yet — show immediately, stream will fill in
+            fadeIn()
             return
         }
 
-        // Capture a fresh frame BEFORE showing so first visible frame has content
+        // Grab one screenshot BEFORE showing so the first visible frame has
+        // content — the stream takes a beat to deliver its first frame.
         Task {
             do {
                 let filter = SCContentFilter(desktopIndependentWindow: scWindow)
-                let config = self.makeCaptureConfig()
+                let config = self.makeStreamConfig()
                 let image = try await SCScreenshotManager.captureImage(
                     contentFilter: filter, configuration: config
                 )
-                let nsImage = NSImage(
-                    cgImage: image,
-                    size: NSSize(width: self.frame.width, height: self.frame.height)
-                )
                 await MainActor.run {
-                    self.imageView.image = nsImage
+                    self.contentLayer.contents = image
                     self.fadeIn()
                 }
             } catch {
@@ -185,28 +242,57 @@ class WindowOverlay: NSPanel {
             context.duration = 0.15
             self.animator().alphaValue = 1
         }
-        startCapturing()
+        startStream()
+        startFrameSync()
     }
 
-    // MARK: - Capture loop
+    // MARK: - Live stream
 
-    private func startCapturing() {
-        captureTimer?.invalidate()
-        let interval = 1.0 / Self.captureRate
-        captureTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
-            self?.captureAndDisplay()
+    private func startStream() {
+        guard stream == nil else { return }
+        guard let scWindow = self.scWindow else {
+            resolveSCWindow(thenStartStream: true)
+            return
+        }
+
+        let config = makeStreamConfig()
+        lastStreamSize = frame.size
+        let filter = SCContentFilter(desktopIndependentWindow: scWindow)
+        let newStream = SCStream(filter: filter, configuration: config, delegate: self)
+        do {
+            try newStream.addStreamOutput(self, type: .screen, sampleHandlerQueue: sampleQueue)
+        } catch {
+            wplog("overlay: addStreamOutput failed wid=\(targetWindowID): \(error)")
+            return
+        }
+        stream = newStream
+        newStream.startCapture { [weak self] error in
+            guard let error = error else { return }
+            wplog("overlay: startCapture failed wid=\(self?.targetWindowID ?? 0): \(error)")
+            DispatchQueue.main.async {
+                if self?.stream === newStream { self?.stream = nil }
+            }
+        }
+        wplog("overlay: stream starting wid=\(targetWindowID) maxFPS=\(Self.captureRate)")
+    }
+
+    private func stopStream() {
+        guard let stream = stream else { return }
+        self.stream = nil
+        stream.stopCapture { error in
+            if let error = error {
+                wplog("overlay: stopCapture error: \(error)")
+            }
         }
     }
 
-    private func stopCapturing() {
-        captureTimer?.invalidate()
-        captureTimer = nil
-    }
-
-    func restartCapturing() {
-        if isPinVisible {
-            stopCapturing()
-            startCapturing()
+    /// Apply the current capture-rate setting to a running stream.
+    func applyCaptureRate() {
+        guard let stream = stream else { return }
+        stream.updateConfiguration(makeStreamConfig()) { error in
+            if let error = error {
+                wplog("overlay: updateConfiguration (rate) error: \(error)")
+            }
         }
     }
 
@@ -216,52 +302,46 @@ class WindowOverlay: NSPanel {
             : [.fullScreenAuxiliary]
     }
 
-    private func captureAndDisplay() {
-        updateFrameFromTarget()
-
-        guard let scWindow = self.scWindow else {
-            wplog("overlay: capture skipped — SCWindow not yet resolved for wid=\(targetWindowID)")
-            resolveSCWindow()
-            return
-        }
-
-        Task {
-            do {
-                let filter = SCContentFilter(desktopIndependentWindow: scWindow)
-                let config = self.makeCaptureConfig()
-
-                let image = try await SCScreenshotManager.captureImage(
-                    contentFilter: filter,
-                    configuration: config
-                )
-
-                let nsImage = NSImage(
-                    cgImage: image,
-                    size: NSSize(width: self.frame.width, height: self.frame.height)
-                )
-
-                await MainActor.run {
-                    self.imageView.image = nsImage
-                }
-            } catch {
-                wplog("overlay: SCScreenshotManager.captureImage error wid=\(targetWindowID): \(error)")
-            }
-        }
-    }
-
-    private func makeCaptureConfig() -> SCStreamConfiguration {
+    private func makeStreamConfig() -> SCStreamConfiguration {
         let config = SCStreamConfiguration()
-        config.width = Int(self.frame.width * 2)   // Retina
-        config.height = Int(self.frame.height * 2)
+        let scale = screen?.backingScaleFactor ?? 2
+        config.width = max(Int(frame.width * scale), 1)
+        config.height = max(Int(frame.height * scale), 1)
         config.scalesToFit = true
         config.showsCursor = false
+        config.pixelFormat = kCVPixelFormatType_32BGRA
+        config.queueDepth = 5
+        config.minimumFrameInterval = CMTime(
+            seconds: 1.0 / max(Self.captureRate, 0.1),
+            preferredTimescale: 600
+        )
         return config
     }
 
-    private func updateFrameFromTarget() {
-        guard let frame = Self.getWindowFrame(windowID: targetWindowID) else { return }
-        if self.frame != frame {
-            setFrame(frame, display: false)
+    // MARK: - Frame sync (follow the target window while visible)
+
+    private func startFrameSync() {
+        frameSyncTimer?.invalidate()
+        frameSyncTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            self?.syncFrameWithTarget()
+        }
+    }
+
+    private func stopFrameSync() {
+        frameSyncTimer?.invalidate()
+        frameSyncTimer = nil
+    }
+
+    private func syncFrameWithTarget() {
+        guard let target = Self.getWindowFrame(windowID: targetWindowID) else { return }
+        if frame != target {
+            setFrame(target, display: false)
+        }
+        // Window resized → the stream's output size needs to follow.
+        if stream != nil,
+           abs(target.width - lastStreamSize.width) > 1 || abs(target.height - lastStreamSize.height) > 1 {
+            lastStreamSize = target.size
+            applyCaptureRate()
         }
     }
 
@@ -284,6 +364,45 @@ class WindowOverlay: NSPanel {
     }
 
     deinit {
-        stopCapturing()
+        frameSyncTimer?.invalidate()
+        if let stream = stream {
+            stream.stopCapture { _ in }
+        }
+    }
+}
+
+// MARK: - SCStreamOutput / SCStreamDelegate
+
+extension WindowOverlay: SCStreamOutput, SCStreamDelegate {
+
+    func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
+        guard type == .screen,
+              let attachments = CMSampleBufferGetSampleAttachmentsArray(
+                  sampleBuffer, createIfNecessary: false
+              ) as? [[SCStreamFrameInfo: Any]],
+              let statusRaw = attachments.first?[.status] as? Int,
+              statusRaw == SCFrameStatus.complete.rawValue,
+              let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer),
+              let surface = CVPixelBufferGetIOSurface(pixelBuffer) else { return }
+
+        let surfaceRef = surface.takeUnretainedValue()
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.displayedFrame = pixelBuffer
+            self.contentLayer.contents = surfaceRef
+        }
+    }
+
+    func stream(_ stream: SCStream, didStopWithError error: Error) {
+        wplog("overlay: stream stopped wid=\(targetWindowID): \(error)")
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            if self.stream === stream { self.stream = nil }
+            // Window may have closed (tracker will prune it), or capture broke
+            // (display reconfigure) — retry while we're still pinned-visible.
+            if self.isPinVisible {
+                self.resolveSCWindow(thenStartStream: true)
+            }
+        }
     }
 }

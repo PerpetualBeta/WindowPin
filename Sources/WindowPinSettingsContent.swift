@@ -6,8 +6,8 @@ struct WindowPinSettingsContent: View {
     let delegate: AppDelegate
 
     var body: some View {
-        Section("Capture") {
-            Picker("Capture rate", selection: Binding(
+        Section("Overlays") {
+            Picker("Maximum frame rate", selection: Binding(
                 get: { WindowOverlay.captureRate },
                 set: { rate in
                     UserDefaults.standard.set(rate, forKey: "captureRate")
@@ -21,7 +21,21 @@ struct WindowPinSettingsContent: View {
                 Text("10 fps").tag(10.0)
                 Text("15 fps").tag(15.0)
                 Text("30 fps").tag(30.0)
+                Text("60 fps").tag(60.0)
             }
+            Text("Overlays only update when the window's content changes, so high rates cost nothing for static content.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Toggle("Interact through overlays", isOn: Binding(
+                get: { WindowOverlay.forwardEvents },
+                set: { newValue in
+                    UserDefaults.standard.set(newValue, forKey: "forwardEvents")
+                }
+            ))
+            Text("Clicks and scrolls on an overlay are sent to the pinned window. ⌘-click an overlay to switch to the real window. When off, any click switches to the real window.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
 
             Toggle("Pin to all spaces", isOn: Binding(
                 get: { WindowOverlay.pinToAllSpaces },

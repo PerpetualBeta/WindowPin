@@ -102,7 +102,7 @@ final class PinnedWindowTracker {
 
     func updateCaptureRate() {
         for (_, overlay) in overlays {
-            overlay.restartCapturing()
+            overlay.applyCaptureRate()
         }
     }
 

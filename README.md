@@ -20,7 +20,9 @@ After installation:
 
 ## How It Works
 
-WindowPin captures a live image of any window and displays it as a floating overlay that stays on top of everything else. The overlay updates continuously at a configurable frame rate.
+WindowPin mirrors any window as a floating overlay that stays on top of everything else. The overlay is a live ScreenCaptureKit stream — it updates the moment the window's content changes (up to a configurable frame rate) and costs essentially nothing while the content is static.
+
+Clicks and scrolls on the overlay are forwarded to the real window, so you can scroll a pinned document or click a button in it without leaving the app you're working in. Keyboard input always stays with your active app — to type into the pinned window, switch to it (⌘-click the overlay).
 
 When you switch to the app that owns a pinned window, the overlay automatically drops behind the real window so you interact with the actual app — not the overlay.
 
@@ -46,7 +48,7 @@ Press the shortcut again to unpin.
 
 - **Keyboard shortcut**: Bring the pinned window to the front and press **⌃⌘P**
 - **Menu**: Click the pin icon in the menu bar and click **Unpin** next to the window, or choose **Unpin All**
-- **Click the overlay**: Clicking a pinned overlay brings the real window to the front and hides the overlay behind it
+- **⌘-click the overlay**: Brings the real window to the front and hides the overlay behind it
 
 Closed windows are automatically unpinned.
 
@@ -54,10 +56,14 @@ Closed windows are automatically unpinned.
 
 | Action | Result |
 |--------|--------|
-| Click an overlay | Brings the real window to the front; overlay drops behind it |
-| Drag an overlay | Repositions the overlay on screen |
+| Click, drag, or right-click an overlay | Forwarded to the real window — buttons, links, and text selection work in place |
+| Scroll on an overlay | Scrolls the real window |
+| ⌘-click an overlay | Brings the real window to the front; overlay drops behind it |
+| Type | Keyboard input is never forwarded — it stays with your active app |
 | Switch to the pinned window's app | Overlay automatically drops behind the real window |
 | Switch to a different app | Overlay floats back on top |
+
+Forwarding can be turned off in Settings (**Interact through overlays**) — a plain click then switches to the real window instead.
 
 ## Menu Bar Icon
 
@@ -71,24 +77,19 @@ Click the icon to access:
 - **Pin/Unpin** the frontmost window
 - A list of all currently **pinned windows** (click to unpin)
 - **Unpin All** — remove all pinned overlays
-- **Change Shortcut** — set a custom keyboard shortcut
-- **Capture Rate** — adjust how often the overlay refreshes
-- **Pin to All Spaces** — make overlays visible across all Mission Control spaces
+- **Settings…** — frame rate, overlay interaction, spaces, shortcut, and permissions
 - **Check for Updates…** — manual Sparkle update check
 - **Quit**
 
 ## Settings
 
-### Capture Rate
+### Maximum Frame Rate
 
-Controls how frequently the overlay image refreshes. Available rates:
+Caps how fast the overlay can update. Frames are only captured when the window's content actually changes, so the default of **30 fps** costs essentially nothing for static content — lower it only if you want to limit CPU use while pinning video or animations.
 
-| Rate | Best for |
-|------|----------|
-| 0.5 fps | Static content (documents, reference pages) |
-| **1 fps** (default) | General use |
-| 2–5 fps | Slowly changing content (dashboards, chat) |
-| 10–30 fps | Video or rapidly updating content (higher CPU usage) |
+### Interact Through Overlays
+
+On by default: clicks and scrolls on an overlay are forwarded to the pinned window, and ⌘-click switches to the real window. When off, any click on an overlay switches to the real window.
 
 ### Pin to All Spaces
 
@@ -117,7 +118,7 @@ WindowPin requires two macOS permissions:
 
 ### Accessibility (required)
 
-Needed for the global keyboard shortcut and for bringing windows to the front.
+Needed for the global keyboard shortcut, for forwarding clicks and scrolls to pinned windows, and for bringing windows to the front.
 
 - Prompted automatically on first launch
 - Grant in: **System Settings → Privacy & Security → Accessibility**

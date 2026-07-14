@@ -46,9 +46,9 @@ enum WindowLevelManager {
                 let raiseResult = AXUIElementPerformAction(axWindow, kAXRaiseAction as CFString)
                 wplog("raiseWindow: AXRaise wid=\(windowID) pid=\(pid) result=\(raiseResult.rawValue)")
 
-                // Also bring the app's windows to front without taking keyboard focus
+                // Activate the app so the raised window also takes keyboard
+                // focus — this is an explicit "switch to the real window" action.
                 if let runningApp = NSRunningApplication(processIdentifier: pid) {
-                    // activate(options: []) brings windows to front without key focus
                     runningApp.activate()
                     wplog("raiseWindow: activated app '\(runningApp.localizedName ?? "?")'")
                 }
