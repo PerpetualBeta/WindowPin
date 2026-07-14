@@ -5,15 +5,16 @@ struct WindowPinSettingsContent: View {
     let tracker: PinnedWindowTracker
     let delegate: AppDelegate
 
+    // @AppStorage (not computed Bindings) so SwiftUI's selection state stays in
+    // sync with the store — a computed Binding here goes stale after the first
+    // change and silently swallows every second interaction.
+    @AppStorage("captureRate") private var captureRate: Double = 30.0
+    @AppStorage("forwardEvents") private var forwardEvents: Bool = true
+    @AppStorage("pinToAllSpaces") private var pinToAllSpaces: Bool = false
+
     var body: some View {
         Section("Overlays") {
-            Picker("Maximum frame rate", selection: Binding(
-                get: { WindowOverlay.captureRate },
-                set: { rate in
-                    UserDefaults.standard.set(rate, forKey: "captureRate")
-                    tracker.updateCaptureRate()
-                }
-            )) {
+            Picker("Maximum frame rate", selection: $captureRate) {
                 Text("0.5 fps").tag(0.5)
                 Text("1 fps").tag(1.0)
                 Text("2 fps").tag(2.0)
@@ -23,27 +24,22 @@ struct WindowPinSettingsContent: View {
                 Text("30 fps").tag(30.0)
                 Text("60 fps").tag(60.0)
             }
+            .onChange(of: captureRate) { _, _ in
+                tracker.updateCaptureRate()
+            }
             Text("Overlays only update when the window's content changes, so high rates cost nothing for static content.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
-            Toggle("Interact through overlays", isOn: Binding(
-                get: { WindowOverlay.forwardEvents },
-                set: { newValue in
-                    UserDefaults.standard.set(newValue, forKey: "forwardEvents")
-                }
-            ))
+            Toggle("Interact through overlays", isOn: $forwardEvents)
             Text("Clicks and scrolls on an overlay are sent to the pinned window. ⌘-click an overlay to switch to the real window. When off, any click switches to the real window.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
-            Toggle("Pin to all spaces", isOn: Binding(
-                get: { WindowOverlay.pinToAllSpaces },
-                set: { newValue in
-                    UserDefaults.standard.set(newValue, forKey: "pinToAllSpaces")
+            Toggle("Pin to all spaces", isOn: $pinToAllSpaces)
+                .onChange(of: pinToAllSpaces) { _, _ in
                     tracker.updateAllSpaces()
                 }
-            ))
         }
 
         Section("Shortcut") {
