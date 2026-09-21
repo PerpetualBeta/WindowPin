@@ -10,6 +10,17 @@ struct JorvikShortcutRecorder: View {
     @Binding var modifiers: NSEvent.ModifierFlags
     var displayString: () -> String
     var onChanged: (() -> Void)?
+
+    /// Supplied when the shortcut may be unset. Storage differs across the
+    /// estate — some apps keep a `keyCode`/`modifiers` pair, others a
+    /// `HotkeyConfig` in `HotkeyStore` — so the call site decides what clearing
+    /// means and this view only offers the button and refreshes afterwards.
+    ///
+    /// Left nil no Clear button is drawn, which is what the apps that never had
+    /// one expect. It exists because the recorder this replaced,
+    /// `HotkeyRecorderView`, had a clear affordance and dropping it would have
+    /// been a regression for the four apps moving across.
+    var onClear: (() -> Void)?
     var eventTapToDisable: CFMachPort?
 
     @State private var shortcutText: String = ""
@@ -43,6 +54,13 @@ struct JorvikShortcutRecorder: View {
                 Text(shortcutText)
                     .foregroundStyle(.secondary)
                     .font(.caption)
+                if onClear != nil, !shortcutText.isEmpty {
+                    Button(L10n.string("shortcut.clear", defaultValue: "Clear")) {
+                        onClear?()
+                        shortcutText = displayString()
+                    }
+                    .font(.caption)
+                }
                 Button(L10n.string("shortcut.change", defaultValue: "Change\u{2026}")) {
                     startRecording()
                 }
