@@ -23,6 +23,21 @@ struct JorvikShortcutRecorder: View {
     var onClear: (() -> Void)?
     var eventTapToDisable: CFMachPort?
 
+    /// Called with `true` when recording begins and `false` when it ends.
+    ///
+    /// A global hotkey registered through Carbon's `RegisterEventHotKey` is
+    /// consumed by the system before the keystroke reaches this view. Pressing
+    /// the shortcut that is already set therefore fires the app's action instead
+    /// of being recorded, and the existing shortcut can never be re-recorded —
+    /// which is exactly what it looks like from the user's side: "I clicked
+    /// Change, pressed my shortcut, and the app just did the thing."
+    ///
+    /// The owner must unregister its hotkeys for the duration. Apps driving a
+    /// shortcut from a CGEvent tap use `eventTapToDisable` instead; a plain
+    /// `addGlobalMonitorForEvents` does not consume the event, so those apps
+    /// record correctly but should still use this to avoid firing the action.
+    var onRecordingChanged: ((Bool) -> Void)?
+
     @State private var shortcutText: String = ""
     @State private var isRecording = false
     @State private var localMonitor: Any?
@@ -82,6 +97,7 @@ struct JorvikShortcutRecorder: View {
         }
 
         isRecording = true
+        onRecordingChanged?(true)
 
         let handleEvent = { (event: NSEvent) in
             let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
@@ -120,11 +136,20 @@ struct JorvikShortcutRecorder: View {
         if let tap = eventTapToDisable {
             CGEvent.tapEnable(tap: tap, enable: true)
         }
+        onRecordingChanged?(false)
     }
 }
 
 extension Notification.Name {
     static let jorvikShortcutChanged = Notification.Name("JorvikShortcutChanged")
+
+    /// Posted while a recorder is listening, `userInfo["recording"]` a `Bool`.
+    ///
+    /// For apps whose settings view has no route back to the delegate and
+    /// already decouple re-registration through `jorvikShortcutChanged`. Apps
+    /// that can pass a closure should use the recorder's `onRecordingChanged`
+    /// instead — this exists so neither has to invent its own mechanism.
+    static let jorvikShortcutRecordingChanged = Notification.Name("JorvikShortcutRecordingChanged")
 }
 
 enum JorvikShortcutPanel {
