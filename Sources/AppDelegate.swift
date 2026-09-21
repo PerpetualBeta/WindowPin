@@ -72,10 +72,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: - Lifecycle
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // The App scene replaces the Settings command group, so Command+, can no
-        // longer open the empty placeholder window; this takes out the separator
-        // that removing the "Settings…" item leaves behind.
-        JorvikApplicationMenu.removeRedundantSeparators()
+        // There is no SwiftUI App to build a menu bar for us, so build one. It is
+        // never drawn — an accessory app has no menu bar — but AppKit routes key
+        // equivalents through it, which is what makes Command+Q quit and the
+        // editing shortcuts work in the settings window's text fields.
+        JorvikApplicationMenu.install()
 
         NSApp.setActivationPolicy(.accessory)
 

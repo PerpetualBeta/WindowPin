@@ -1,20 +1,25 @@
-import SwiftUI
+import Cocoa
 
+/// The entry point. Deliberately not a SwiftUI `App`.
+///
+/// `App` must vend at least one scene, and the only scene this app ever had was
+/// a `Settings { EmptyView() }` placeholder it never opened — the settings
+/// window the user sees comes from the status-item menu, via
+/// `JorvikSettingsView.showWindow`. On macOS 26 and later that placeholder is
+/// opened as a real window at launch: blank, titled after the app, roughly
+/// 900x450. Removing the scene removes the window it could open.
+///
+/// `@main` on a type rather than top-level code in a `main.swift`, because
+/// `AppDelegate` is `@MainActor` and top-level code is not isolated to it, so
+/// constructing the delegate there does not compile.
 @main
-struct WindowPinApp: App {
-    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+enum WindowPinMain {
 
-    var body: some Scene {
-        // This scene exists only because App requires one — the Settings window
-        // the user sees is opened from the status-item menu, imperatively, by
-        // JorvikSettingsView.showWindow. A Settings scene also brings the
-        // standard "Settings…" item and its Command+, shortcut, and both opened
-        // this empty placeholder as a second Settings window. Replacing the
-        // command group removes the item and the shortcut with it; removing the
-        // menu item on its own does not, the shortcut still reaches the scene.
-        Settings { EmptyView() }
-            .commands {
-                CommandGroup(replacing: .appSettings) { }
-            }
+    @MainActor
+    static func main() {
+        let app = NSApplication.shared
+        let delegate = AppDelegate()
+        app.delegate = delegate
+        app.run()
     }
 }
