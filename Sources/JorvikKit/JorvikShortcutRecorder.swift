@@ -15,7 +15,12 @@ struct JorvikShortcutRecorder: View {
     @State private var shortcutText: String = ""
     @State private var isRecording = false
     @State private var localMonitor: Any?
-    @State private var globalMonitor: Any?
+    // There is no global key monitor, deliberately. Recording used to install
+    // one alongside the local monitor, for keystrokes arriving while this app
+    // was not frontmost. That needs an Accessibility grant, and without one it
+    // was created and never fired. It was unreachable regardless: recording
+    // starts when the user clicks the field, so this app IS frontmost and the
+    // local monitor has the keystroke.
 
     var body: some View {
         HStack {
@@ -82,15 +87,10 @@ struct JorvikShortcutRecorder: View {
             handleEvent(event)
             return nil
         }
-
-        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { event in
-            handleEvent(event)
-        }
     }
 
     private func stopRecording() {
         if let m = localMonitor { NSEvent.removeMonitor(m); localMonitor = nil }
-        if let m = globalMonitor { NSEvent.removeMonitor(m); globalMonitor = nil }
         isRecording = false
 
         // Re-enable event tap
