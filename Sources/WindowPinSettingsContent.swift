@@ -61,6 +61,14 @@ struct WindowPinSettingsContent: View {
                 ),
                 displayString: { delegate.shortcutDisplayString() },
                 onChanged: { delegate.saveShortcutAndUpdateTap() },
+                onClear: {
+                    // Pinning stays available from the menu, which falls back
+                    // to the last foreign window, so clearing costs nothing but
+                    // the shortcut itself.
+                    delegate.shortcutKeyCode = 0
+                    delegate.shortcutModifiers = []
+                    delegate.saveShortcutAndUpdateTap()
+                },
                 eventTapToDisable: delegate.currentEventTap
             )
         }

@@ -31,8 +31,18 @@ private func hotkeyTapCallback(
     let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
     let flags = event.flags
 
+    let relevant: CGEventFlags = [.maskCommand, .maskControl, .maskShift, .maskAlternate]
+
+    // Nothing bound, nothing to match. A cleared shortcut is stored as key code
+    // 0 with no modifiers, and **key code 0 is the letter A**, so without this
+    // a bare A would satisfy both halves of the test below (0 == 0, and an
+    // empty flag set equals an empty flag set). It would toggle the pin and be
+    // swallowed, because that branch returns nil.
+    guard _shortcutKeyCode != 0 || !_shortcutCGModifiers.intersection(relevant).isEmpty else {
+        return Unmanaged.passUnretained(event)
+    }
+
     if keyCode == _shortcutKeyCode {
-        let relevant: CGEventFlags = [.maskCommand, .maskControl, .maskShift, .maskAlternate]
         if flags.intersection(relevant) == _shortcutCGModifiers.intersection(relevant) {
             DispatchQueue.main.async {
                 _hotkeyAction?()
@@ -397,6 +407,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// Push current binding to the JorvikKit registry so ShortcutHUD can list it.
     private func republishHotkey() {
+        // A cleared binding is published as nothing rather than as key code 0,
+        // which ShortcutHUD would otherwise list as the letter A.
+        guard shortcutKeyCode != 0 || !shortcutModifiers.isEmpty else {
+            JorvikHotkeyRegistry.publish([])
+            return
+        }
         JorvikHotkeyRegistry.publish([
             JorvikHotkey(actionTitle: "Toggle Pin",
                          keyCode: shortcutKeyCode,
@@ -408,6 +424,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // Shortcut recording is handled by JorvikShortcutRecorder in JorvikKit
 
     func shortcutDisplayString() -> String {
+        // Say so rather than rendering key code 0 as the letter A.
+        guard shortcutKeyCode != 0 || !shortcutModifiers.isEmpty else { return "Not set" }
         var parts: [String] = []
         if shortcutModifiers.contains(.control) { parts.append("⌃") }
         if shortcutModifiers.contains(.option) { parts.append("⌥") }
