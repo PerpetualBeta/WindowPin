@@ -103,6 +103,17 @@ enum WindowLevelManager {
     }
 
     /// Match an AXUIElement window to a CGWindowID by comparing position and size.
+    /// The Accessibility element for a window, found the same way `raiseWindow`
+    /// finds it. Exposed so the AX scroll probe can address the same window the
+    /// overlay is mirroring, rather than guessing.
+    static func axWindow(pid: pid_t, windowID: UInt32) -> AXUIElement? {
+        let app = AXUIElementCreateApplication(pid)
+        var windowsRef: AnyObject?
+        guard AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &windowsRef) == .success,
+              let windows = windowsRef as? [AXUIElement] else { return nil }
+        return windows.first { matchesWindowID(axWindow: $0, pid: pid, targetWID: windowID) }
+    }
+
     private static func matchesWindowID(axWindow: AXUIElement, pid: pid_t, targetWID: UInt32) -> Bool {
         // Get AX position and size
         var posRef: AnyObject?

@@ -150,6 +150,20 @@ class WindowOverlay: NSPanel {
 
     // MARK: - Event handling
 
+    /// Drive the pinned window through Accessibility instead of forwarding
+    /// events to it. macOS 27 only.
+    ///
+    /// On 27 a posted CGEvent cannot be placed inside another app's window —
+    /// see `forwardEvents` — so scrolling a pin had simply stopped working.
+    /// Setting the target's scroll position directly does work, and was
+    /// measured on 2026-09-23 to scroll a background, occluded Finder window
+    /// three times running without the frontmost app changing.
+    ///
+    /// Scroll only. There is no equivalent for a click: pressing a button
+    /// through Accessibility would activate something the user only pointed
+    /// at, so a click still takes you to the real window, which is the
+    /// behaviour Jonathan said he prefers anyway.
+
     override func sendEvent(_ event: NSEvent) {
         guard isPinVisible, Self.forwardEvents else {
             super.sendEvent(event)
@@ -436,6 +450,8 @@ extension WindowOverlay: SCStreamOutput, SCStreamDelegate {
             if !self.didLogFirstFrame {
                 self.didLogFirstFrame = true
                 wplog("overlay: first frame \(CVPixelBufferGetWidth(pixelBuffer))x\(CVPixelBufferGetHeight(pixelBuffer))px for \(Int(self.frame.width))x\(Int(self.frame.height))pt @\(self.streamPixelScale)x wid=\(self.targetWindowID)")
+                // Stage B measurement, behind its own flag. See AXScroller.
+                AXScroller.probe(pid: self.targetPID, windowID: self.targetWindowID)
             }
             self.displayedFrame = pixelBuffer
             self.contentLayer.contents = surfaceRef
