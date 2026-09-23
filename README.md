@@ -28,7 +28,13 @@ After installation:
 
 WindowPin mirrors any window as a floating overlay that stays on top of everything else. The overlay is a live ScreenCaptureKit stream — it updates the moment the window's content changes (up to a configurable frame rate) and costs essentially nothing while the content is static.
 
-Clicks and scrolls on the overlay are forwarded to the real window, so you can scroll a pinned document or click a button in it without leaving the app you're working in. Keyboard input always stays with your active app — to type into the pinned window, switch to it (`command`-click the overlay).
+What you can do with an overlay depends on your macOS version, because macOS 27 changed what one app may do to another's windows.
+
+**On macOS 27 and later**, you can scroll a pinned window from wherever you are working, and the pane you point at is the one that scrolls. A click takes you to the real window rather than pressing something inside it. See [Interacting with Overlays](#interacting-with-overlays) for what this does and does not cover.
+
+**On macOS 14 to 26**, clicks and scrolls are both forwarded to the real window, so you can scroll a pinned document or click a button in it without leaving the app you're working in.
+
+Keyboard input always stays with your active app on every version — to type into a pinned window, switch to it.
 
 When you switch to the app that owns a pinned window, the overlay automatically drops behind the real window so you interact with the actual app — not the overlay.
 
@@ -54,11 +60,29 @@ Press the shortcut again to unpin.
 
 - **Keyboard shortcut**: Bring the pinned window to the front and press `control` `command` `P`
 - **Menu**: Click the pin icon in the menu bar and click **Unpin** next to the window, or choose **Unpin All**
-- **`command`-click the overlay**: Brings the real window to the front and hides the overlay behind it
+- **Click the overlay**: Brings the real window to the front and hides the overlay behind it. On macOS 14 to 26 this is `command`-click, because a plain click is forwarded to the window instead
 
 Closed windows are automatically unpinned.
 
 ## Interacting with Overlays
+
+### On macOS 27 and later
+
+| Action | Result |
+|--------|--------|
+| Scroll on an overlay | Scrolls the pinned window, under the pointer, without changing which app you are working in |
+| Click an overlay | Takes you to the real window and brings its app forward |
+| Type | Keyboard input is never sent to the pin — it stays with your active app |
+| Switch to the pinned window's app | Overlay automatically drops behind the real window |
+| Switch to a different app | Overlay floats back on top |
+
+Scrolling can be turned off in Settings (**Interact through overlays**). Clicking always takes you to the real window.
+
+**What scrolling does not cover.** WindowPin scrolls the pinned window by setting its scroll position through macOS's accessibility interface, which means the app has to offer one. Most Mac apps do, including Finder, Mail, Safari and Preview. Apps built on Electron or Chromium frequently do not, and a window that offers nothing scrollable simply will not scroll. Nothing else about the pin is affected.
+
+**Why clicking cannot press things any more.** On macOS 27 an app may no longer deliver a click into another app's window: the click arrives but the system places it in the corner of the window rather than where you aimed, so it reaches nothing. Every published and unpublished route to do otherwise was measured and none works. Pressing controls through the accessibility interface instead was rejected deliberately — it would activate whatever you happened to point at, which is not the same thing as clicking it.
+
+### On macOS 14 to 26
 
 | Action | Result |
 |--------|--------|
@@ -95,7 +119,11 @@ Caps how fast the overlay can update. Frames are only captured when the window's
 
 ### Interact Through Overlays
 
-On by default: clicks and scrolls on an overlay are forwarded to the pinned window, and `command`-click switches to the real window. When off, any click on an overlay switches to the real window.
+On by default.
+
+On **macOS 27 and later** this controls scrolling: on, a scroll on an overlay scrolls the pinned window; off, it does nothing. Clicking takes you to the real window either way.
+
+On **macOS 14 to 26** it controls both: on, clicks and scrolls are forwarded to the pinned window and `command`-click switches to the real window; off, any click on an overlay switches to the real window.
 
 ### Pin to All Spaces
 
@@ -126,7 +154,7 @@ WindowPin requires two macOS permissions:
 
 ### Accessibility (required)
 
-Needed for the global keyboard shortcut, for forwarding clicks and scrolls to pinned windows, and for bringing windows to the front.
+Needed for the global keyboard shortcut, for scrolling pinned windows, and for bringing windows to the front.
 
 - Prompted automatically on first launch
 - Grant in: **System Settings → Privacy & Security → Accessibility**
