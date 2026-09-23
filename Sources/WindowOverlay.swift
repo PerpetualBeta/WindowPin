@@ -163,8 +163,64 @@ class WindowOverlay: NSPanel {
     /// through Accessibility would activate something the user only pointed
     /// at, so a click still takes you to the real window, which is the
     /// behaviour Jonathan said he prefers anyway.
+    /// The target window's bounds in global top-left coordinates.
+    static func windowBounds(_ windowID: CGWindowID) -> CGRect? {
+        guard let info = CGWindowListCopyWindowInfo(.optionIncludingWindow, windowID) as? [[String: Any]],
+              let b = info.first?[kCGWindowBounds as String] as? [String: CGFloat] else { return nil }
+        return CGRect(x: b["X"] ?? 0, y: b["Y"] ?? 0,
+                      width: b["Width"] ?? 0, height: b["Height"] ?? 0)
+    }
+
+    private var usesAccessibilityScrolling: Bool {
+        if #available(macOS 27, *) {
+            // The same switch the user already knows, "Interact through
+            // overlays". On 27 that means scrolling, since clicking now always
+            // hands over. A second hidden knob would only be a way to get the
+            // two out of step.
+            return Self.forwardEvents
+        }
+        return false
+    }
 
     override func sendEvent(_ event: NSEvent) {
+        if event.type == .scrollWheel, isPinVisible, usesAccessibilityScrolling {
+            // Where the pointer is, in the global top-left space Accessibility
+            // reports element frames in. The overlay covers the target window
+            // exactly, so a point on the overlay is the same point on the
+            // target: take the fraction across the overlay and apply it to the
+            // window's own bounds.
+            let size = frame.size
+            if size.width > 0, size.height > 0,
+               let bounds = Self.windowBounds(targetWindowID) {
+                let loc = event.locationInWindow
+                let point = CGPoint(
+                    x: bounds.origin.x + (loc.x / size.width) * bounds.width,
+                    y: bounds.origin.y + ((size.height - loc.y) / size.height) * bounds.height)
+                AXScroller.scroll(pid: targetPID, windowID: targetWindowID,
+                                  deltaY: event.scrollingDeltaY, at: point)
+            }
+            return
+        }
+        // macOS 27: a click never goes to the forwarder, whatever the setting
+        // says. Forwarding cannot place an event inside another app's window
+        // there, so routing a click into it makes the click silently do
+        // nothing — which is what happened when this was left to a DEFAULT: a
+        // value already stored on the machine beat the new default and the
+        // click disappeared. Taking the user to the real window is the honest
+        // response, and it is the behaviour Jonathan asked for.
+        if #available(macOS 27, *), isPinVisible {
+            switch event.type {
+            case .leftMouseDown, .rightMouseDown, .otherMouseDown:
+                activateRealWindow()
+                return
+            case .leftMouseUp, .leftMouseDragged, .rightMouseUp, .rightMouseDragged,
+                 .otherMouseUp, .otherMouseDragged:
+                return      // the down already handed over; swallow the rest
+            default:
+                break
+            }
+        }
+
         guard isPinVisible, Self.forwardEvents else {
             super.sendEvent(event)
             return
@@ -237,6 +293,7 @@ class WindowOverlay: NSPanel {
     /// Fully remove overlay from screen (used when unpinning / cleaning up).
     func hideOverlay() {
         wplog("overlay: hideOverlay wid=\(targetWindowID)")
+        AXScroller.forget(windowID: targetWindowID)
         isPinVisible = false
         stopStream()
         stopFrameSync()
