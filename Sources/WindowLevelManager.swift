@@ -4,16 +4,50 @@ import Foundation
 
 // MARK: - Logging
 
-private let logFile: FileHandle? = {
-    let path = "/tmp/windowpin.log"
-    FileManager.default.createFile(atPath: path, contents: nil)
-    return FileHandle(forWritingAtPath: path)
+// Diagnostic logging — off by default, enabled per-machine via:
+//   defaults write cc.jorviksoftware.WindowPin debugLogging -bool YES
+//   defaults delete cc.jorviksoftware.WindowPin debugLogging   # turn off
+// When on, timestamped lines are appended to
+//   ~/Library/Logs/WindowPin/windowpin.log
+//
+// Never write to Console/stderr or /tmp. This mirrors the Jorvik logging
+// convention (Ballast/Sources/Log.swift): a symlink-safe append to a 0700
+// directory, gated behind a UserDefaults flag read on every call.
+//
+// What this replaced: an ungated FileHandle on /tmp/windowpin.log, opened with
+// `createFile`, which TRUNCATED the log on every launch and wrote for every
+// user whether they wanted it or not. /tmp is shared and world-readable, and
+// this log records PINNED WINDOW TITLES.
+private let wpLogPath: String = {
+    let logs = FileManager.default
+        .urls(for: .libraryDirectory, in: .userDomainMask)[0]
+        .appendingPathComponent("Logs", isDirectory: true)
+        .appendingPathComponent("WindowPin", isDirectory: true)
+    try? FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true,
+                                             attributes: [.posixPermissions: 0o700])
+    return logs.appendingPathComponent("windowpin.log").path
+}()
+private let wpLogQueue = DispatchQueue(label: "cc.jorviksoftware.WindowPin.log")
+private let wpLogFmt: DateFormatter = {
+    let f = DateFormatter()
+    f.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS"
+    return f
 }()
 
-func wplog(_ msg: String) {
-    let line = "\(Date()): \(msg)\n"
-    logFile?.seekToEndOfFile()
-    logFile?.write(line.data(using: .utf8)!)
+/// The message is an `@autoclosure` so a disabled call builds no string. Most
+/// sites here fire on a state change, but the event forwarder logs per scroll
+/// event, which arrives continuously while the user is scrolling.
+func wplog(_ msg: @autoclosure () -> String) {
+    guard UserDefaults.standard.bool(forKey: "debugLogging") else { return }
+    let line = "\(wpLogFmt.string(from: Date()))  \(msg())\n"
+    wpLogQueue.async {
+        guard let data = line.data(using: .utf8) else { return }
+        // O_NOFOLLOW + 0700 parent dir closes the symlink-attack vector.
+        let fd = open(wpLogPath, O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW, 0o600)
+        guard fd >= 0 else { return }
+        defer { close(fd) }
+        data.withUnsafeBytes { _ = write(fd, $0.baseAddress, $0.count) }
+    }
 }
 
 // MARK: - Window Level Manager (Accessibility API approach)
@@ -22,7 +56,11 @@ enum WindowLevelManager {
 
     /// Raise a window to the front of ALL windows (cross-app) without activating its app's keyboard focus.
     /// Uses AXUIElement kAXRaiseAction + NSRunningApplication ordering.
-    static func raiseWindow(pid: pid_t, windowID: UInt32) {
+    /// - Parameter activate: also give the app keyboard focus. Deliberately has
+    ///   NO default. Raising and activating were welded together here, and every
+    ///   caller therefore activated whether it meant to or not; requiring the
+    ///   argument stops a future call site doing that by omission.
+    static func raiseWindow(pid: pid_t, windowID: UInt32, activate: Bool) {
         let app = AXUIElementCreateApplication(pid)
 
         // Check if we're trusted for accessibility
@@ -48,7 +86,7 @@ enum WindowLevelManager {
 
                 // Activate the app so the raised window also takes keyboard
                 // focus — this is an explicit "switch to the real window" action.
-                if let runningApp = NSRunningApplication(processIdentifier: pid) {
+                if activate, let runningApp = NSRunningApplication(processIdentifier: pid) {
                     runningApp.activate()
                     wplog("raiseWindow: activated app '\(runningApp.localizedName ?? "?")'")
                 }
@@ -56,15 +94,12 @@ enum WindowLevelManager {
             }
         }
 
-        // Fallback: raise the first window and hope for the best
-        if let firstWindow = windows.first {
-            let raiseResult = AXUIElementPerformAction(firstWindow, kAXRaiseAction as CFString)
-            wplog("raiseWindow: fallback AXRaise pid=\(pid) result=\(raiseResult.rawValue)")
-
-            if let runningApp = NSRunningApplication(processIdentifier: pid) {
-                runningApp.activate()
-            }
-        }
+        // No fallback. This used to raise `windows.first` "and hope for the
+        // best", which on a match miss raises an unrelated window of that app
+        // and — because activation was welded in — brings the whole app
+        // forward. Doing nothing and saying so is better than acting on the
+        // wrong window.
+        wplog("raiseWindow: no AX window matched wid=\(windowID) pid=\(pid); doing nothing")
     }
 
     /// Match an AXUIElement window to a CGWindowID by comparing position and size.
@@ -107,17 +142,7 @@ enum WindowLevelManager {
         return false
     }
 
-    /// Pin: raise the window immediately.
-    static func pin(windowID: UInt32, pid: pid_t) -> Bool {
-        wplog("pin(wid=\(windowID), pid=\(pid)): raising via AX")
-        raiseWindow(pid: pid, windowID: windowID)
-        return true
-    }
 
-    /// Re-raise a pinned window (called periodically / on app activation).
-    static func reraise(windowID: UInt32, pid: pid_t) {
-        raiseWindow(pid: pid, windowID: windowID)
-    }
 
     /// Unpin is just tracking — no level to reset.
     static func unpin(windowID: UInt32) -> Bool {

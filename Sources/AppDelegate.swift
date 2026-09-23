@@ -1,4 +1,5 @@
 import AppKit
+import CoreGraphics
 import ApplicationServices
 import SwiftUI
 import ServiceManagement
@@ -93,6 +94,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let options = [kAXTrustedCheckOptionPrompt.takeRetainedValue(): true] as CFDictionary
         let trusted = AXIsProcessTrustedWithOptions(options)
         wplog("Accessibility trusted: \(trusted)")
+        // Accessibility is NOT the permission that lets an app post synthetic
+        // events. Apple keeps three independent TCC buckets — Accessibility,
+        // PostEvent and ListenEvent — as three separate rows, each tracked on
+        // its own, and WindowPin has only ever checked the first. Forwarding a
+        // click or a scroll to a pinned window is a *post*, so the one that
+        // decides whether it arrives is PostEvent.
+        wplog("PostEvent access: \(CGPreflightPostEventAccess())  ListenEvent access: \(CGPreflightListenEventAccess())")
 
         loadShortcut()
         republishHotkey()

@@ -55,8 +55,27 @@ class WindowOverlay: NSPanel {
     }
 
     /// Whether clicks/scrolls on an overlay are forwarded to the real window.
+    /// Forward clicks and scrolls into the pinned window.
+    ///
+    /// **Defaults to off on macOS 27 and later.** Forwarding posts a synthetic
+    /// CGEvent to the target process. Measured 2026-09-23 on 27.0 (26A428) with
+    /// a purpose-built receiver app: the events arrive and bind to the correct
+    /// window, but their location is always the window's top-left corner, so
+    /// AppKit hit-tests the corner, finds no view and drops every one. Stamping
+    /// the window resets the location; not stamping it leaves no window bound;
+    /// no integer field carries the location (all 153 were tested); copying a
+    /// real event does not help, nor does write ordering. The window server
+    /// derives that location itself and will not take ours.
+    ///
+    /// Leaving it on there makes every click a silent no-op. Off, a click does
+    /// the obvious thing and takes you to the real window. Earlier releases are
+    /// unaffected and keep the old default.
     static var forwardEvents: Bool {
-        UserDefaults.standard.object(forKey: "forwardEvents") as? Bool ?? true
+        if let stored = UserDefaults.standard.object(forKey: "forwardEvents") as? Bool {
+            return stored
+        }
+        if #available(macOS 27, *) { return false }
+        return true
     }
 
     init(windowID: CGWindowID, pid: pid_t) {
@@ -159,7 +178,9 @@ class WindowOverlay: NSPanel {
     private func activateRealWindow() {
         wplog("overlay: switching to real window wid=\(targetWindowID)")
         sendBehind()
-        WindowLevelManager.raiseWindow(pid: targetPID, windowID: UInt32(targetWindowID))
+        // Explicitly activating: this is the deliberate "take me to the real
+        // window" action, the one place where moving focus is the point.
+        WindowLevelManager.raiseWindow(pid: targetPID, windowID: UInt32(targetWindowID), activate: true)
     }
 
     // MARK: - Z-level transitions (no hide/show, just level changes)
