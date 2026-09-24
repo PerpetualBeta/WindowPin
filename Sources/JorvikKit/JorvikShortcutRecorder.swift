@@ -33,8 +33,10 @@ struct JorvikShortcutRecorder: View {
     /// a localised label to decide a state is the fault; this reads the state.
     ///
     /// `keyCode == 0` is `a`, so it cannot mean "unset" on its own. It does not
-    /// have to: recording requires command, control or option, so a stored
-    /// shortcut always carries a modifier. This is the same test
+    /// have to: recording requires command, control or option unless the key
+    /// is a function key, and no function key has key code 0. So a stored
+    /// shortcut always carries a modifier or a non-zero key code. This is the
+    /// same test
     /// `JorvikHotkeyManager.register` uses to decide whether a slot is worth
     /// registering.
     private var isSet: Bool { keyCode != 0 || !modifiers.isEmpty }
@@ -96,7 +98,7 @@ struct JorvikShortcutRecorder: View {
             if isRecording {
                 Text(needsModifier
                      ? L10n.string("shortcut.needs_modifier",
-                                   defaultValue: "Hold \u{2318}, \u{2303} or \u{2325}")
+                                   defaultValue: "Hold \u{2318}, \u{2303} or \u{2325}, or press an F key")
                      : L10n.string("shortcut.press", defaultValue: "Press shortcut\u{2026}"))
                     .foregroundStyle(.orange)
                     .font(.caption)
@@ -154,7 +156,14 @@ struct JorvikShortcutRecorder: View {
             // being named inside a shortcut control that already draws the
             // shortcut itself in glyphs, and matching what macOS puts in its own
             // menus beats internal consistency here. Jonathan's call, 2026-09-22.
-            guard flags.contains(.command) || flags.contains(.control) || flags.contains(.option) else {
+            //
+            // A function key is the exception, and may be recorded on its own.
+            // It types nothing, so a bare F5 cannot steal a letter from a text
+            // field the way a bare A would. The test is the key code, not the
+            // `.function` flag: macOS also sets that flag on the arrow keys,
+            // Home, End and Page Up/Down, and a bare arrow must stay refused.
+            let isFunctionKey = JorvikShortcutPanel.functionKeyCodes.contains(event.keyCode)
+            guard isFunctionKey || flags.contains(.command) || flags.contains(.control) || flags.contains(.option) else {
                 needsModifier = true
                 return
             }
@@ -198,6 +207,15 @@ extension Notification.Name {
 }
 
 enum JorvikShortcutPanel {
+    /// Key codes of F1 to F20, the keys that may be recorded with no modifier.
+    ///
+    /// They are not in sequence: the virtual key codes follow the physical
+    /// layout of an old Apple keyboard, not the numbering on the key caps.
+    static let functionKeyCodes: Set<UInt16> = [
+        122, 120, 99, 118, 96, 97, 98, 100, 101, 109,   // F1 to F10
+        103, 111, 105, 107, 113, 106, 64, 79, 80, 90,   // F11 to F20
+    ]
+
     // MARK: - Utility: format a keyCode + modifiers as a display string
 
     static func displayString(keyCode: UInt16, modifiers: NSEvent.ModifierFlags) -> String {
@@ -220,6 +238,7 @@ enum JorvikShortcutPanel {
             37: "L", 38: "J", 39: "'", 40: "K", 41: ";", 42: "\\", 43: ",",
             44: "/", 45: "N", 46: "M", 47: ".", 48: "⇥", 49: "Space",
             50: "`", 51: "⌫", 53: "⎋",
+            64: "F17", 79: "F18", 80: "F19", 90: "F20", 106: "F16",
             96: "F5", 97: "F6", 98: "F7", 99: "F3", 100: "F8",
             101: "F9", 103: "F11", 105: "F13", 107: "F14", 109: "F10",
             111: "F12", 113: "F15", 118: "F4", 120: "F2", 122: "F1",

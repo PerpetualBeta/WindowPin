@@ -131,7 +131,7 @@ When enabled, pinned overlays appear on every Mission Control space. When disabl
 
 ### Custom Keyboard Shortcut
 
-Click **Change Shortcut** in the menu, then press your desired key combination. The shortcut must include at least one modifier key (`command`, `control`, `option`, or `shift`).
+Click **Change Shortcut** in the menu, then press your desired key combination. The shortcut must include `command`, `control` or `option`, unless it is a function key: F1 to F20 can be used on their own.
 
 **Clear** removes the shortcut entirely. With none bound, nothing is intercepted, and pinning is still available from the menu-bar icon.
 
