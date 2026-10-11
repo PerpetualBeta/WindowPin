@@ -47,33 +47,10 @@ enum EventForwarder {
     // MARK: - Coordinate mapping
 
     /// Map the event's location on the overlay to the equivalent point inside
-    /// the target window, in global CG (top-left origin) coordinates.
-    /// Proportional mapping keeps the point correct even if the overlay and
-    /// target frames briefly disagree (e.g. mid-resize).
+    /// the target window, in global CG (top-left origin) coordinates. The
+    /// overlay owns the mapping because only it knows whether it is cropped.
     private static func mapToTarget(event: NSEvent, overlay: WindowOverlay) -> CGPoint? {
-        guard let targetBounds = cgBounds(windowID: overlay.targetWindowID) else { return nil }
-        let size = overlay.frame.size
-        guard size.width > 0, size.height > 0 else { return nil }
-
-        let loc = event.locationInWindow
-        let fx = loc.x / size.width
-        let fyFromTop = (size.height - loc.y) / size.height
-        guard fx >= 0, fx <= 1, fyFromTop >= 0, fyFromTop <= 1 else { return nil }
-
-        return CGPoint(
-            x: targetBounds.origin.x + fx * targetBounds.width,
-            y: targetBounds.origin.y + fyFromTop * targetBounds.height
-        )
-    }
-
-    /// Raw window bounds in global CG (top-left origin) coordinates.
-    private static func cgBounds(windowID: CGWindowID) -> CGRect? {
-        guard let info = CGWindowListCopyWindowInfo(.optionIncludingWindow, windowID) as? [[String: Any]],
-              let bounds = info.first?[kCGWindowBounds as String] as? [String: CGFloat] else { return nil }
-        return CGRect(
-            x: bounds["X"] ?? 0, y: bounds["Y"] ?? 0,
-            width: bounds["Width"] ?? 0, height: bounds["Height"] ?? 0
-        )
+        overlay.targetPoint(forLocation: event.locationInWindow)
     }
 
     // MARK: - Mouse events

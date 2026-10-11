@@ -2,6 +2,12 @@ import AppKit
 import CoreMedia
 import ScreenCaptureKit
 
+/// The window number behind an Accessibility window element. Private, but
+/// unchanged for many macOS releases and relied on by window managers that
+/// need to join the two worlds; there is no public equivalent.
+@_silgen_name("_AXUIElementGetWindow")
+private func _AXUIElementGetWindow(_ element: AXUIElement, _ windowID: UnsafeMutablePointer<CGWindowID>) -> AXError
+
 /// A floating panel that mirrors a foreign window's content via a live
 /// ScreenCaptureKit stream. Acts as a live "picture-in-picture" view that
 /// stays on top of all windows.
@@ -18,6 +24,10 @@ import ScreenCaptureKit
 /// While the overlay is front, clicks and scrolls on it are forwarded to the
 /// real window (see EventForwarder), so the pinned window can be scrolled and
 /// clicked without switching apps. ⌘-click switches to the real window.
+///
+/// Option-drag crops the overlay to part of the window (see `crop`). A cropped
+/// overlay is a small panel of its own: it can be dragged anywhere, and it
+/// stays up while other windows of the same app are in use.
 class WindowOverlay: NSPanel {
 
     let targetWindowID: CGWindowID
@@ -31,7 +41,40 @@ class WindowOverlay: NSPanel {
     /// so ScreenCaptureKit can't recycle it out from under the layer.
     private var displayedFrame: CVPixelBuffer?
     private var frameSyncTimer: Timer?
-    private var lastStreamSize: CGSize = .zero
+    /// The part of the window the running stream was configured for, so a
+    /// resize or a new crop can tell whether the stream needs reconfiguring.
+    private var lastStreamGeometry: CGRect = .zero
+
+    /// The part of the target window this pin shows, in points from the
+    /// window's top-left corner. nil shows the whole window.
+    ///
+    /// Option-drag on a pin draws it; option-click on a cropped pin clears it.
+    /// It is a fixed area of the window, so content that scrolls or reflows
+    /// can move out of it. Moving the window is fine: the crop moves with it.
+    private(set) var crop: CGRect?
+    /// Where the user dragged a cropped pin to. nil keeps the pin over the
+    /// area of the window it shows, following the window as it moves.
+    private var movedOrigin: NSPoint?
+    var isCropped: Bool { crop != nil }
+
+    /// Called when a crop is set or cleared, so the tracker can start or stop
+    /// deciding this pin's layering window by window. See `isTargetInUse`.
+    var onCropChange: (() -> Void)?
+
+    /// Option-drag in progress: where it started, in the panel's own points.
+    private var selectionStart: NSPoint?
+    private let selectionShade = CAShapeLayer()
+    private let selectionBorder = CAShapeLayer()
+    /// Plain drag on a cropped pin in progress: the pointer and the panel
+    /// origin when it started, both in screen points.
+    private var moveStart: (pointer: NSPoint, origin: NSPoint)?
+    private var didMove = false
+    /// A selection smaller than this either way is taken as a click, not a
+    /// crop. It is also about as small as a pin can usefully be.
+    private static let minimumCropSide: CGFloat = 16
+    /// How far a plain press on a cropped pin must travel to be a move rather
+    /// than a click. AppKit's own drag threshold is of the same order.
+    private static let moveThreshold: CGFloat = 3
     /// Points→pixels scale of the capture, taken from the content filter.
     private var streamPixelScale: CGFloat = 2
     private var didLogFirstFrame = false
@@ -111,6 +154,25 @@ class WindowOverlay: NSPanel {
         view.autoresizingMask = [.width, .height]
         contentView = view
 
+        // The option-drag selection: the outside is shaded, the inside left
+        // clear, with a dashed edge. Sublayers survive each frame replacing
+        // the content layer's contents.
+        selectionShade.fillRule = .evenOdd
+        selectionShade.fillColor = NSColor.black.withAlphaComponent(0.45).cgColor
+        selectionBorder.fillColor = nil
+        selectionBorder.strokeColor = NSColor.white.cgColor
+        selectionBorder.lineWidth = 1.5
+        selectionBorder.lineDashPattern = [6, 4]
+        selectionBorder.shadowColor = NSColor.black.cgColor
+        selectionBorder.shadowOpacity = 0.8
+        selectionBorder.shadowRadius = 1
+        selectionBorder.shadowOffset = .zero
+        for layer in [selectionShade, selectionBorder] {
+            layer.isHidden = true
+            layer.actions = ["path": NSNull(), "hidden": NSNull()]
+            contentLayer.addSublayer(layer)
+        }
+
         // Resolve the SCWindow asynchronously
         resolveSCWindow()
     }
@@ -182,20 +244,43 @@ class WindowOverlay: NSPanel {
         return false
     }
 
+    /// The point in the target window under a point on the overlay, in global
+    /// top-left coordinates. The overlay shows either the whole window or its
+    /// crop, scaled to the panel: take the fraction across the panel and apply
+    /// it to the part of the window being shown. Fractions rather than offsets
+    /// keep the point right while the two frames briefly disagree mid-resize.
+    func targetPoint(forLocation loc: NSPoint) -> CGPoint? {
+        let size = frame.size
+        guard size.width > 0, size.height > 0,
+              let bounds = Self.windowBounds(targetWindowID) else { return nil }
+        let fx = loc.x / size.width
+        let fyFromTop = (size.height - loc.y) / size.height
+        guard fx >= 0, fx <= 1, fyFromTop >= 0, fyFromTop <= 1 else { return nil }
+        let shown = shownRect(windowSize: bounds.size)
+        return CGPoint(x: bounds.origin.x + shown.minX + fx * shown.width,
+                       y: bounds.origin.y + shown.minY + fyFromTop * shown.height)
+    }
+
+    /// The part of the window on show, in points from its top-left corner.
+    private func shownRect(windowSize: CGSize) -> CGRect {
+        clampedCrop(windowSize: windowSize) ?? CGRect(origin: .zero, size: windowSize)
+    }
+
+    /// The crop, trimmed to the window as it is now. A window made smaller than
+    /// its crop shows what is left of it; one that loses the area entirely
+    /// keeps the original rectangle, so the pin keeps its size and shows the
+    /// window's edge rather than collapsing to nothing.
+    private func clampedCrop(windowSize: CGSize) -> CGRect? {
+        guard let crop else { return nil }
+        let trimmed = crop.intersection(CGRect(origin: .zero, size: windowSize))
+        return trimmed.isNull || trimmed.width < 1 || trimmed.height < 1 ? crop : trimmed
+    }
+
     override func sendEvent(_ event: NSEvent) {
+        if isPinVisible, handleCropGesture(event) { return }
+
         if event.type == .scrollWheel, isPinVisible, usesAccessibilityScrolling {
-            // Where the pointer is, in the global top-left space Accessibility
-            // reports element frames in. The overlay covers the target window
-            // exactly, so a point on the overlay is the same point on the
-            // target: take the fraction across the overlay and apply it to the
-            // window's own bounds.
-            let size = frame.size
-            if size.width > 0, size.height > 0,
-               let bounds = Self.windowBounds(targetWindowID) {
-                let loc = event.locationInWindow
-                let point = CGPoint(
-                    x: bounds.origin.x + (loc.x / size.width) * bounds.width,
-                    y: bounds.origin.y + ((size.height - loc.y) / size.height) * bounds.height)
+            if let point = targetPoint(forLocation: event.locationInWindow) {
                 AXScroller.scroll(pid: targetPID, windowID: targetWindowID,
                                   deltaY: event.scrollingDeltaY, at: point)
             }
@@ -251,6 +336,208 @@ class WindowOverlay: NSPanel {
         // Explicitly activating: this is the deliberate "take me to the real
         // window" action, the one place where moving focus is the point.
         WindowLevelManager.raiseWindow(pid: targetPID, windowID: UInt32(targetWindowID), activate: true)
+    }
+
+    // MARK: - Cropping
+
+    /// Option-drag selects an area to crop to; option-click on a cropped pin
+    /// shows the whole window again. On a cropped pin a plain drag moves it and
+    /// a plain click still hands over to the real window. Returns whether the
+    /// event was used.
+    ///
+    /// This runs before forwarding, on every macOS: a cropped pin is small and
+    /// sits wherever the user put it, so moving it has to be possible, and an
+    /// option-drag is no longer passed to the pinned app on macOS 26 and earlier.
+    private func handleCropGesture(_ event: NSEvent) -> Bool {
+        switch event.type {
+        case .leftMouseDown where event.modifierFlags.contains(.option):
+            selectionStart = event.locationInWindow
+            showSelection(to: event.locationInWindow)
+            return true
+        case .leftMouseDragged where selectionStart != nil:
+            showSelection(to: event.locationInWindow)
+            return true
+        case .leftMouseUp where selectionStart != nil:
+            finishSelection(at: event.locationInWindow)
+            return true
+
+        case .leftMouseDown where isCropped:
+            moveStart = (NSEvent.mouseLocation, frame.origin)
+            didMove = false
+            return true
+        case .leftMouseDragged where moveStart != nil:
+            guard let start = moveStart else { return true }
+            let pointer = NSEvent.mouseLocation
+            let dx = pointer.x - start.pointer.x, dy = pointer.y - start.pointer.y
+            if didMove || hypot(dx, dy) >= Self.moveThreshold {
+                didMove = true
+                let origin = NSPoint(x: start.origin.x + dx, y: start.origin.y + dy)
+                movedOrigin = origin
+                setFrameOrigin(origin)
+            }
+            return true
+        case .leftMouseUp where moveStart != nil:
+            moveStart = nil
+            if !didMove { activateRealWindow() }
+            return true
+
+        default:
+            return false
+        }
+    }
+
+    /// The selection from where the option-drag started to `point`, both in
+    /// the panel's points, limited to the panel.
+    private func selectionRect(to point: NSPoint) -> CGRect? {
+        guard let start = selectionStart else { return nil }
+        let panel = CGRect(origin: .zero, size: frame.size)
+        let rect = CGRect(x: min(start.x, point.x), y: min(start.y, point.y),
+                          width: abs(point.x - start.x), height: abs(point.y - start.y))
+        return rect.intersection(panel)
+    }
+
+    private func showSelection(to point: NSPoint) {
+        let panel = CGRect(origin: .zero, size: frame.size)
+        let rect = selectionRect(to: point) ?? .zero
+        let scale = backingScaleFactor
+        let shade = CGMutablePath()
+        shade.addRect(panel)
+        shade.addRect(rect)
+        for layer in [selectionShade, selectionBorder] {
+            layer.frame = panel
+            layer.contentsScale = scale
+            layer.isHidden = false
+        }
+        selectionShade.path = shade
+        // Inset by half the line so the edge is drawn inside the selection
+        // and stays visible when it runs along the panel's edge.
+        selectionBorder.path = CGPath(rect: rect.insetBy(dx: 0.75, dy: 0.75), transform: nil)
+    }
+
+    private func finishSelection(at point: NSPoint) {
+        let rect = selectionRect(to: point)
+        selectionStart = nil
+        selectionShade.isHidden = true
+        selectionBorder.isHidden = true
+
+        guard let rect, !rect.isNull,
+              rect.width >= Self.minimumCropSide, rect.height >= Self.minimumCropSide else {
+            // An option-click, or a selection too small to be one.
+            if isCropped { setCrop(nil) }
+            return
+        }
+        guard let windowSize = Self.windowBounds(targetWindowID)?.size,
+              frame.width > 0, frame.height > 0 else { return }
+
+        // Panel points (bottom-left origin) to window points (top-left
+        // origin), through whatever is on show now, so cropping a cropped pin
+        // narrows it further.
+        let shown = shownRect(windowSize: windowSize)
+        let sx = shown.width / frame.width, sy = shown.height / frame.height
+        let windowRect = CGRect(x: shown.minX + rect.minX * sx,
+                                y: shown.minY + (frame.height - rect.maxY) * sy,
+                                width: rect.width * sx, height: rect.height * sy).integral
+        setCrop(windowRect)
+    }
+
+    private func setCrop(_ newCrop: CGRect?) {
+        if let windowSize = Self.windowBounds(targetWindowID)?.size {
+            showLastFrame(from: shownRect(windowSize: windowSize),
+                          to: newCrop.map { $0.intersection(CGRect(origin: .zero, size: windowSize)) }
+                              ?? CGRect(origin: .zero, size: windowSize))
+        }
+        crop = newCrop
+        movedOrigin = nil
+        if let newCrop {
+            wplog("overlay: crop wid=\(targetWindowID) to \(Int(newCrop.minX)),\(Int(newCrop.minY)) \(Int(newCrop.width))x\(Int(newCrop.height))pt")
+        } else {
+            wplog("overlay: crop cleared wid=\(targetWindowID)")
+        }
+        applyWindowStyle()
+        syncFrameWithTarget()
+        onCropChange?()
+    }
+
+    /// A cropped pin looks like a window of its own, so it gets the system's
+    /// window corners and edge. Neither has a public value to copy, so the pin
+    /// becomes a titled window with an invisible title bar and macOS draws
+    /// them, whatever the current release uses. A whole-window pin stays
+    /// borderless: the window it shows already has its own corners.
+    ///
+    /// Moving is left to `handleCropGesture`, so the title bar must not move
+    /// the window itself.
+    private func applyWindowStyle() {
+        let framed: NSWindow.StyleMask = [.titled, .fullSizeContentView]
+        let wanted = isCropped
+        guard styleMask.isSuperset(of: framed) != wanted else { return }
+        if wanted {
+            styleMask.formUnion(framed)
+            titleVisibility = .hidden
+            titlebarAppearsTransparent = true
+            for button in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+                standardWindowButton(button)?.isHidden = true
+            }
+            isMovable = false
+        } else {
+            styleMask.subtract(framed)
+        }
+    }
+
+    /// Until the stream sends a frame of the new area, show the matching part
+    /// of the frame already on the layer. The stream sends frames only when the
+    /// window changes, so without this a quiet window would show its old,
+    /// whole picture squeezed into the new panel. Clearing a crop has nothing
+    /// to show beyond the old area, so the pin is left empty for that moment
+    /// rather than stretched.
+    private func showLastFrame(from old: CGRect, to new: CGRect) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+        guard old.width > 0, old.height > 0, old.contains(new) else {
+            contentLayer.contents = nil
+            displayedFrame = nil
+            contentLayer.contentsRect = CGRect(x: 0, y: 0, width: 1, height: 1)
+            return
+        }
+        // Unit rectangle of `new` within `old`, bottom-left origin, composed
+        // with any part-frame already being shown.
+        let current = contentLayer.contentsRect
+        let ux = (new.minX - old.minX) / old.width
+        let uy = (old.maxY - new.maxY) / old.height
+        let uw = new.width / old.width, uh = new.height / old.height
+        contentLayer.contentsRect = CGRect(x: current.minX + ux * current.width,
+                                           y: current.minY + uy * current.height,
+                                           width: uw * current.width, height: uh * current.height)
+    }
+
+    /// Whether the user is working in the pinned window itself: its app is
+    /// frontmost and it is that app's front window.
+    ///
+    /// A whole-window pin drops behind whenever its app is active, which is
+    /// right for it: it covers the window exactly. A cropped pin is small and
+    /// often moved elsewhere, typically from a window torn off for the
+    /// purpose, so it must stay up while another window of the same app is in
+    /// use, such as a different Safari window.
+    ///
+    /// The app is asked for its main window through Accessibility. The window
+    /// list cannot answer this: on macOS 27 the badge the system draws on a
+    /// window being captured is a small normal-layer window owned by the
+    /// captured app, in front of it, so the app's front window in the list is
+    /// never the pinned one (measured 2026-10-11, TextEdit).
+    ///
+    /// The main window is identified by its window number, not by matching
+    /// frames as `WindowLevelManager.axWindow` does: every tab in a tab group
+    /// is its own window with the same frame, so a frame match cannot tell the
+    /// selected tab from the one pinned.
+    var isTargetInUse: Bool {
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == targetPID else { return false }
+        let app = AXUIElementCreateApplication(targetPID)
+        var mainRef: AnyObject?
+        guard AXUIElementCopyAttributeValue(app, kAXMainWindowAttribute as CFString, &mainRef) == .success,
+              let main = mainRef, CFGetTypeID(main) == AXUIElementGetTypeID() else { return false }
+        var mainID: CGWindowID = 0
+        guard _AXUIElementGetWindow(main as! AXUIElement, &mainID) == .success else { return false }
+        return mainID == targetWindowID
     }
 
     // MARK: - Z-level transitions (no hide/show, just level changes)
@@ -358,7 +645,7 @@ class WindowOverlay: NSPanel {
         let filterScale = CGFloat(filter.pointPixelScale)
         streamPixelScale = filterScale >= 1 ? filterScale : displayScale
         let config = makeStreamConfig(pixelScale: streamPixelScale)
-        lastStreamSize = frame.size
+        lastStreamGeometry = currentStreamGeometry()
         didLogFirstFrame = false
         let newStream = SCStream(filter: filter, configuration: config, delegate: self)
         do {
@@ -421,6 +708,12 @@ class WindowOverlay: NSPanel {
         // stretched over a Retina layer, which reads as a slightly blurred pin.
         config.width = max(Int(frame.width * pixelScale), 1)
         config.height = max(Int(frame.height * pixelScale), 1)
+        // A crop films only that part of the window. For a single-window
+        // filter the rectangle is in points from the window's top-left corner.
+        if let windowSize = Self.windowBounds(targetWindowID)?.size,
+           let crop = clampedCrop(windowSize: windowSize) {
+            config.sourceRect = crop
+        }
         config.captureResolution = .best
         config.scalesToFit = true
         config.showsCursor = false
@@ -449,15 +742,38 @@ class WindowOverlay: NSPanel {
 
     private func syncFrameWithTarget() {
         guard let target = Self.getWindowFrame(windowID: targetWindowID) else { return }
-        if frame != target {
-            setFrame(target, display: false)
+        let wanted = panelFrame(forTarget: target)
+        if frame != wanted {
+            setFrame(wanted, display: false)
         }
-        // Window resized → the stream's output size needs to follow.
-        if stream != nil,
-           abs(target.width - lastStreamSize.width) > 1 || abs(target.height - lastStreamSize.height) > 1 {
-            lastStreamSize = target.size
+        // Window resized or crop changed → the stream's output size and the
+        // area it films need to follow.
+        let geometry = streamGeometry(windowSize: target.size, panelSize: wanted.size)
+        if stream != nil, !geometry.equalTo(lastStreamGeometry) {
+            lastStreamGeometry = geometry
             applyCaptureRate()
         }
+    }
+
+    /// Where the panel goes: over the whole window, over the cropped area of
+    /// it, or wherever the user dragged a cropped pin to.
+    private func panelFrame(forTarget target: NSRect) -> NSRect {
+        guard let crop = clampedCrop(windowSize: target.size) else { return target }
+        if let movedOrigin { return NSRect(origin: movedOrigin, size: crop.size) }
+        // Window points run down from the top; screen points run up.
+        return NSRect(x: target.minX + crop.minX, y: target.maxY - crop.maxY,
+                      width: crop.width, height: crop.height)
+    }
+
+    /// What the stream must be configured for: the filmed area's origin and
+    /// the panel's size, which is the stream's output size in points.
+    private func streamGeometry(windowSize: CGSize, panelSize: CGSize) -> CGRect {
+        CGRect(origin: shownRect(windowSize: windowSize).origin, size: panelSize)
+    }
+
+    private func currentStreamGeometry() -> CGRect {
+        let windowSize = Self.windowBounds(targetWindowID)?.size ?? frame.size
+        return streamGeometry(windowSize: windowSize, panelSize: frame.size)
     }
 
     // MARK: - Coordinate conversion (CG top-left → NS bottom-left)
@@ -509,6 +825,24 @@ extension WindowOverlay: SCStreamOutput, SCStreamDelegate {
                 wplog("overlay: first frame \(CVPixelBufferGetWidth(pixelBuffer))x\(CVPixelBufferGetHeight(pixelBuffer))px for \(Int(self.frame.width))x\(Int(self.frame.height))pt @\(self.streamPixelScale)x wid=\(self.targetWindowID)")
                 // Stage B measurement, behind its own flag. See AXScroller.
                 AXScroller.probe(pid: self.targetPID, windowID: self.targetWindowID)
+            }
+            let unit = CGRect(x: 0, y: 0, width: 1, height: 1)
+            if self.contentLayer.contentsRect != unit {
+                // Showing part of an old frame after a crop change. Only a
+                // frame sized for the new panel is of the new area; frames of
+                // the old area can still be in flight and must not be shown
+                // whole in the new panel.
+                let w = CVPixelBufferGetWidth(pixelBuffer), h = CVPixelBufferGetHeight(pixelBuffer)
+                let wantW = Int(self.frame.width * self.streamPixelScale)
+                let wantH = Int(self.frame.height * self.streamPixelScale)
+                guard abs(w - wantW) <= 2, abs(h - wantH) <= 2 else { return }
+                CATransaction.begin()
+                CATransaction.setDisableActions(true)
+                self.contentLayer.contentsRect = unit
+                self.displayedFrame = pixelBuffer
+                self.contentLayer.contents = surfaceRef
+                CATransaction.commit()
+                return
             }
             self.displayedFrame = pixelBuffer
             self.contentLayer.contents = surfaceRef

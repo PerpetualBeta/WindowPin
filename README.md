@@ -64,6 +64,28 @@ Press the shortcut again to unpin.
 
 Closed windows are automatically unpinned.
 
+## Cropping a Pin
+
+You can keep only part of a pinned window in view, such as a score on a web page or the last lines of a long-running task.
+
+1. `option`-drag across the pin to select the area you want to keep
+2. Release the mouse button. The pin shrinks to that area and stays on top, still live
+
+You can then:
+
+- **Move it**: drag the cropped pin to anywhere on the screen
+- **Crop it again**: `option`-drag inside it to keep a smaller area
+- **Show the whole window again**: `option`-click it
+- **Go to the real window**: click it
+
+A cropped pin stays on top while you use other windows of the same app, and drops behind only while you use the pinned window itself.
+
+**Things to know:**
+
+- The crop is a fixed area of the window. If the page scrolls, reflows or the window changes size, what you wanted to watch can move out of the crop. Moving the window is fine: the crop goes with it.
+- A crop shows only what the window is showing. If you switch a tabbed window to another tab, the crop stops showing the tab you cropped live: depending on the app, it shows the new tab, or a frozen picture of the old one. To keep watching one tab, drag that tab out into its own window and pin that window instead. It can sit behind your other windows.
+- A minimised window stops updating.
+
 ## Interacting with Overlays
 
 ### On macOS 27 and later
@@ -72,6 +94,7 @@ Closed windows are automatically unpinned.
 |--------|--------|
 | Scroll on an overlay | Scrolls the pinned window, under the pointer, without changing which app you are working in |
 | Click an overlay | Takes you to the real window and brings its app forward |
+| `option`-drag an overlay | Crops it to the area you select (see [Cropping a Pin](#cropping-a-pin)) |
 | Type | Keyboard input is never sent to the pin — it stays with your active app |
 | Switch to the pinned window's app | Overlay automatically drops behind the real window |
 | Switch to a different app | Overlay floats back on top |
@@ -89,6 +112,7 @@ Scrolling can be turned off in Settings (**Interact through overlays**). Clickin
 | Click, drag, or right-click an overlay | Forwarded to the real window — buttons, links, and text selection work in place |
 | Scroll on an overlay | Scrolls the real window |
 | `command`-click an overlay | Brings the real window to the front; overlay drops behind it |
+| `option`-drag an overlay | Crops it to the area you select (see [Cropping a Pin](#cropping-a-pin)). A cropped pin is moved by dragging and takes you to the real window when clicked, so clicks on it are not forwarded; scrolling still is |
 | Type | Keyboard input is never forwarded — it stays with your active app |
 | Switch to the pinned window's app | Overlay automatically drops behind the real window |
 | Switch to a different app | Overlay floats back on top |
@@ -180,7 +204,7 @@ git clone https://github.com/PerpetualBeta/jorvik-release.git
 git clone https://github.com/PerpetualBeta/WindowPin.git
 cd WindowPin
 gmake build
-open.build/WindowPin.app
+open .build/WindowPin.app
 ```
 
 ## Troubleshooting

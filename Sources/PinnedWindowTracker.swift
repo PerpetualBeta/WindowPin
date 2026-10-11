@@ -32,6 +32,8 @@ final class PinnedWindowTracker {
     private(set) var pinnedWindows: Set<PinnedWindow> = []
     private var overlays: [UInt32: WindowOverlay] = [:]
     private var pollTimer: Timer?
+    /// Runs only while a pin is cropped. See `updateCroppedLayering`.
+    private var layeringTimer: Timer?
     private var activationObserver: NSObjectProtocol?
     private var terminationObserver: NSObjectProtocol?
 
@@ -56,6 +58,8 @@ final class PinnedWindowTracker {
 
     // MARK: - Public API
 
+
+
     func isPinned(windowID: UInt32) -> Bool {
         pinnedWindows.contains(where: { $0.windowID == windowID })
     }
@@ -77,6 +81,7 @@ final class PinnedWindowTracker {
             windowID: CGWindowID(window.windowID),
             pid: window.ownerPID
         )
+        overlay.onCropChange = { [weak self] in self?.cropsChanged() }
         overlays[window.windowID] = overlay
         wplog("pin: overlay created for wid=\(window.windowID)")
 
@@ -140,13 +145,63 @@ final class PinnedWindowTracker {
             // - Otherwise → raise overlay to front (user switched away, keep pinned content visible)
             for pw in self.pinnedWindows {
                 if let overlay = self.overlays[pw.windowID] {
-                    if pw.ownerPID == activatedPID {
+                    if overlay.isCropped {
+                        self.updateLayering(of: overlay)
+                    } else if pw.ownerPID == activatedPID {
                         overlay.sendBehind()
                     } else {
                         overlay.bringToFront()
                     }
                 }
             }
+        }
+    }
+
+    // MARK: - Cropped pins
+
+    /// A cropped pin goes behind only while its own window is the one in use,
+    /// not whenever its app is active (see `WindowOverlay.isTargetInUse`).
+    /// Switching windows inside one app raises no notification, so while any
+    /// pin is cropped its layering is checked on a timer. Half a second matches
+    /// how often a visible pin already follows its window.
+    private static let layeringInterval: TimeInterval = 0.5
+
+    private func cropsChanged() {
+        let anyCropped = overlays.values.contains { $0.isCropped }
+        if anyCropped, layeringTimer == nil {
+            layeringTimer = Timer.scheduledTimer(withTimeInterval: Self.layeringInterval,
+                                                 repeats: true) { [weak self] _ in
+                self?.updateCroppedLayering()
+            }
+        } else if !anyCropped {
+            layeringTimer?.invalidate()
+            layeringTimer = nil
+        }
+    }
+
+    private func updateCroppedLayering() {
+        // The last cropped pin may have been unpinned or closed since.
+        guard overlays.values.contains(where: { $0.isCropped }) else {
+            cropsChanged()
+            return
+        }
+        // WindowPin itself in front (its menu or settings) changes nothing,
+        // as with app activation.
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier
+                != ProcessInfo.processInfo.processIdentifier else { return }
+        for overlay in overlays.values where overlay.isCropped {
+            updateLayering(of: overlay)
+        }
+    }
+
+    private func updateLayering(of overlay: WindowOverlay) {
+        // Act only on a change: this runs twice a second, and bringToFront
+        // logs each call it skips.
+        let inUse = overlay.isTargetInUse
+        if inUse, overlay.isPinVisible {
+            overlay.sendBehind()
+        } else if !inUse, !overlay.isPinVisible {
+            overlay.bringToFront()
         }
     }
 
