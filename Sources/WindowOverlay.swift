@@ -26,7 +26,8 @@ private func _AXUIElementGetWindow(_ element: AXUIElement, _ windowID: UnsafeMut
 /// clicked without switching apps. ⌘-click switches to the real window.
 ///
 /// Option-drag crops the overlay to part of the window (see `crop`). A cropped
-/// overlay is a small panel of its own: it can be dragged anywhere, and it
+/// overlay is a small panel of its own: it can be dragged anywhere, resized by
+/// its edges to show more or less of the window, and it
 /// stays up while other windows of the same app are in use.
 class WindowOverlay: NSPanel {
 
@@ -69,6 +70,18 @@ class WindowOverlay: NSPanel {
     /// origin when it started, both in screen points.
     private var moveStart: (pointer: NSPoint, origin: NSPoint)?
     private var didMove = false
+    /// Set by `mouseDown(with:)` when a press on a cropped pin reaches the
+    /// content, meaning AppKit did not take it as a resize.
+    private var pressReachedContent = false
+    /// A press AppKit took (a resize) is in progress; its drags and release
+    /// go to AppKit too.
+    private var systemPressInProgress = false
+    /// True while WindowPin itself is setting the panel's frame, so that the
+    /// resize observer only reacts to the user resizing a cropped pin.
+    private var applyingFrame = false
+    /// The panel's frame after the last change that was accounted for, so a
+    /// resize can tell which edges moved and by how much.
+    private var lastPanelFrame: NSRect = .zero
     /// A selection smaller than this either way is taken as a click, not a
     /// crop. It is also about as small as a pin can usefully be.
     private static let minimumCropSide: CGFloat = 16
@@ -175,6 +188,12 @@ class WindowOverlay: NSPanel {
 
         // Resolve the SCWindow asynchronously
         resolveSCWindow()
+
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.didResizeNotification, object: self, queue: .main
+        ) { [weak self] _ in
+            self?.cropFollowsResize()
+        }
     }
 
     // MARK: - ScreenCaptureKit window resolution
@@ -327,8 +346,21 @@ class WindowOverlay: NSPanel {
     /// Fallback when event forwarding is disabled: any click switches to the
     /// real window (the pre-forwarding behaviour).
     override func mouseDown(with event: NSEvent) {
+        // A cropped pin sends presses through AppKit to find out whether they
+        // are a resize; one that arrives here was not, and is handled by
+        // `handleCropGesture` as a move or a click.
+        if isCropped {
+            pressReachedContent = true
+            return
+        }
         activateRealWindow()
     }
+
+    /// A cropped pin is a titled window, which AppKit would otherwise let
+    /// become key on a click. The pin must never take the keyboard from the
+    /// app being worked in.
+    override var canBecomeKey: Bool { false }
+    override var canBecomeMain: Bool { false }
 
     private func activateRealWindow() {
         wplog("overlay: switching to real window wid=\(targetWindowID)")
@@ -362,8 +394,30 @@ class WindowOverlay: NSPanel {
             return true
 
         case .leftMouseDown where isCropped:
-            moveStart = (NSEvent.mouseLocation, frame.origin)
-            didMove = false
+            // macOS decides whether a press is on the window's resize edge;
+            // there is no public way to ask where that edge is. So the press
+            // goes to AppKit first. A press anywhere but the edge reaches the
+            // content and lands in `mouseDown(with:)`, which marks it as ours
+            // to move or click. One on the edge starts a resize, which AppKit
+            // carries on through the drags that follow (measured on 27.0.1:
+            // this call returns at once, before any of them).
+            pressReachedContent = false
+            super.sendEvent(event)
+            if pressReachedContent {
+                moveStart = (NSEvent.mouseLocation, frame.origin)
+                didMove = false
+            } else {
+                // AppKit took the press as a resize. It carries the resize on
+                // through the drags that follow, so they must reach it.
+                systemPressInProgress = true
+            }
+            return true
+        case .leftMouseDragged where systemPressInProgress:
+            super.sendEvent(event)
+            return true
+        case .leftMouseUp where systemPressInProgress:
+            systemPressInProgress = false
+            super.sendEvent(event)
             return true
         case .leftMouseDragged where moveStart != nil:
             guard let start = moveStart else { return true }
@@ -374,6 +428,7 @@ class WindowOverlay: NSPanel {
                 let origin = NSPoint(x: start.origin.x + dx, y: start.origin.y + dy)
                 movedOrigin = origin
                 setFrameOrigin(origin)
+                lastPanelFrame = frame
             }
             return true
         case .leftMouseUp where moveStart != nil:
@@ -453,7 +508,11 @@ class WindowOverlay: NSPanel {
         } else {
             wplog("overlay: crop cleared wid=\(targetWindowID)")
         }
+        // Changing the style can resize the panel, which must not be read as
+        // the user resizing the new crop.
+        applyingFrame = true
         applyWindowStyle()
+        applyingFrame = false
         syncFrameWithTarget()
         onCropChange?()
     }
@@ -467,7 +526,7 @@ class WindowOverlay: NSPanel {
     /// Moving is left to `handleCropGesture`, so the title bar must not move
     /// the window itself.
     private func applyWindowStyle() {
-        let framed: NSWindow.StyleMask = [.titled, .fullSizeContentView]
+        let framed: NSWindow.StyleMask = [.titled, .fullSizeContentView, .resizable]
         let wanted = isCropped
         guard styleMask.isSuperset(of: framed) != wanted else { return }
         if wanted {
@@ -478,9 +537,56 @@ class WindowOverlay: NSPanel {
                 standardWindowButton(button)?.isHidden = true
             }
             isMovable = false
+            contentMinSize = NSSize(width: Self.minimumCropSide, height: Self.minimumCropSide)
         } else {
             styleMask.subtract(framed)
         }
+    }
+
+    /// The user resized a cropped pin by one of its edges or corners. The crop
+    /// moves the same edges by the same amount, so the pin shows more or less
+    /// of the window around what it showed before, at the same scale. A crop
+    /// cannot grow past the window, so the panel is trimmed back to it.
+    private func cropFollowsResize() {
+        guard isCropped, !applyingFrame,
+              let (newCrop, _) = resizedCrop(from: lastPanelFrame, to: frame) else { return }
+        crop = newCrop
+        if movedOrigin != nil { movedOrigin = frame.origin }
+        lastPanelFrame = frame
+        syncFrameWithTarget()
+    }
+
+    /// The crop a resize from `old` to `new` asks for, and the panel frame
+    /// that shows it. The crop moves the same edges by the same amount; it
+    /// cannot grow past the window, so anything outside is trimmed, and the
+    /// panel loses the same amount from the same edges.
+    private func resizedCrop(from old: NSRect, to new: NSRect) -> (CGRect, NSRect)? {
+        guard let crop, old != .zero, old != new,
+              let target = Self.getWindowFrame(windowID: targetWindowID) else { return nil }
+        // Screen points run up, window points run down: the top edge moving
+        // up by d moves the crop's top up the window by d.
+        let proposed = CGRect(x: crop.minX + (new.minX - old.minX),
+                              y: crop.minY + (old.maxY - new.maxY),
+                              width: new.width, height: new.height)
+        var trimmed = proposed.intersection(CGRect(origin: .zero, size: target.size))
+        if trimmed.isNull { trimmed = crop }
+        trimmed = trimmed.integral
+        let panel = NSRect(x: new.minX + (trimmed.minX - proposed.minX),
+                           y: new.minY + (proposed.maxY - trimmed.maxY),
+                           width: trimmed.width, height: trimmed.height)
+        return (trimmed, panel)
+    }
+
+    /// AppKit resizes through here. A resize that would take a cropped pin
+    /// past the edge of the window is trimmed before it is applied, so the
+    /// edge stops at the window instead of overshooting and snapping back.
+    override func setFrame(_ frameRect: NSRect, display flag: Bool) {
+        if isCropped, !applyingFrame, inLiveResize,
+           let (_, panel) = resizedCrop(from: lastPanelFrame, to: frameRect) {
+            super.setFrame(panel, display: flag)
+            return
+        }
+        super.setFrame(frameRect, display: flag)
     }
 
     /// Until the stream sends a frame of the new area, show the matching part
@@ -744,8 +850,11 @@ class WindowOverlay: NSPanel {
         guard let target = Self.getWindowFrame(windowID: targetWindowID) else { return }
         let wanted = panelFrame(forTarget: target)
         if frame != wanted {
+            applyingFrame = true
             setFrame(wanted, display: false)
+            applyingFrame = false
         }
+        lastPanelFrame = frame
         // Window resized or crop changed → the stream's output size and the
         // area it films need to follow.
         let geometry = streamGeometry(windowSize: target.size, panelSize: wanted.size)

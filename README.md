@@ -74,6 +74,7 @@ You can keep only part of a pinned window in view, such as a sports score on a w
 You can then:
 
 - **Move it**: drag the cropped pin to anywhere on the screen
+- **Resize it**: drag any edge or corner to show more or less of the window around it. It cannot grow past the edge of the window
 - **Crop it again**: `option`-drag inside it to keep a smaller area
 - **Show the whole window again**: `option`-click it
 - **Go to the real window**: click it
