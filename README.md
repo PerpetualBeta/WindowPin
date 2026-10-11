@@ -66,7 +66,7 @@ Closed windows are automatically unpinned.
 
 ## Cropping a Pin
 
-You can keep only part of a pinned window in view, such as a score on a web page or the last lines of a long-running task.
+You can keep only part of a pinned window in view, such as a sports score on a web page or the last lines of a long-running task.
 
 1. `option`-drag across the pin to select the area you want to keep
 2. Release the mouse button. The pin shrinks to that area and stays on top, still live
